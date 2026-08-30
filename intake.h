@@ -156,17 +156,13 @@ namespace domains {
 
     // ---------- 하루 목표 ----------
 
-    enum class ActivityLevel {
-        Sedentary,    // 거의 안 움직임      x1.2
-        Light,        // 주 1~3회 가벼운 운동 x1.375
-        Moderate,     // 주 3~5회            x1.55
-        Active,       // 주 6~7회            x1.725
-        VeryActive    // 매일 고강도 / 육체노동 x1.9
-    };
-
-    double activityFactor(ActivityLevel level);
+    // ActivityLevel / activityFactor 는 user.h 로 옮겼다.
+    // 활동량은 목표를 만들 때 넘기는 값이 아니라 사용자가 가진 값이기 때문이다.
 
     // 목표 열량을 탄/단/지에 나누는 비율. 셋의 합이 1.0 이어야 한다.
+    //
+    // 이것을 직접 넘기면 옛 방식(비율 고정)으로 계산한다.
+    // 넘기지 않으면 단백질을 g 으로 먼저 잡는 기본 방식을 쓴다. 아래 참고.
     struct MacroRatio {
         double carb    = 0.50;
         double protein = 0.30;
@@ -176,27 +172,68 @@ namespace domains {
         MacroRatio(double carb, double protein, double fat);   // 합이 1이 아니면 예외
     };
 
+    // 계산된 목표 열량이 안전 범위를 벗어나 손을 봤는가
+    enum class GoalAdjustment {
+        None,           // 계산값 그대로
+        RaisedToFloor,  // 하한(minimumDailyCalories)까지 올렸다
+        LoweredToCap    // 상한(kMaximumDailyCalories)까지 내렸다
+    };
+
+    // 남은 열량을 탄수화물과 지방에 나누는 비율 중 탄수화물 몫.
+    // 단백질이 30% 일 때의 옛 50:20 분배와 같은 비율이라 결과가 크게 바뀌지 않는다.
+    extern const double kRemainderCarbShare;
+
+    // 단백질이 총 열량에서 차지할 수 있는 최대 몫.
+    // 열량 목표가 낮을 때 접시가 단백질로만 차는 것을 막는다.
+    extern const double kMaxProteinShare;
+
     // 오늘 먹어야 하는 양
     class NutritionGoal {
     public:
-        // 목표를 g 으로 직접 지정하는 경우
+        // 목표를 g 으로 직접 지정하는 경우.
+        // 직접 지정한 값에는 안전 하한을 적용하지 않는다 (의도된 값으로 본다).
         explicit NutritionGoal(Macros target);
 
-        // 사용자 정보에서 뽑는 경우
-        //   목표 열량 = 기초대사량 x 활동계수
-        //   그 열량을 비율대로 나눈 뒤 각 영양소의 kcal/g 으로 나눠 g 으로 환산
-        static NutritionGoal forUser(const User& user,
-                                     ActivityLevel level = ActivityLevel::Light,
-                                     MacroRatio ratio = MacroRatio{});
+        // 사용자 정보에서 뽑는 경우.
+        //
+        //   목표 열량 = 기초대사량 x 활동계수, 그 뒤 안전 범위로 자름
+        //   단백질   = 기준 체중 x 활동량별 g/kg  (열량의 40% 를 넘지 않는 선에서)
+        //   나머지 열량을 탄수화물 7 : 지방 3 으로 나눔
+        //
+        // 단백질을 비율이 아니라 g 으로 먼저 잡는 이유는 proteinPerKgFor() 의
+        // 주석에 적어 두었다.
+        //
+        // 활동량은 user.activityLevel() 에서 온다. level 을 넘기면 그것을 쓰되
+        // 사용자 정보는 바꾸지 않는다 ("만약 이만큼 움직인다면" 용도).
+        //
+        // 만 kMinAdultAge 세 미만이면 예외를 던진다. 성인용 공식으로 뽑은 숫자를
+        // 성장기 아이의 목표라고 내놓는 것은 이 앱이 할 수 있는 가장 나쁜 거짓말이다.
+        static NutritionGoal forUser(const User& user);
+        static NutritionGoal forUser(const User& user, ActivityLevel level);
+        static NutritionGoal forUser(const User& user, MacroRatio ratio);
+        static NutritionGoal forUser(const User& user, ActivityLevel level,
+                                     MacroRatio ratio);
 
         const Macros& target() const { return target_; }
         double targetCalories() const { return target_.calories(); }
+
+        // 안전 범위 때문에 계산값에서 손을 봤는가.
+        // None 이 아니면 화면에 그 사실을 알려 주어야 한다.
+        GoalAdjustment adjustment() const { return adjustment_; }
+        bool wasAdjusted() const { return adjustment_ != GoalAdjustment::None; }
+
+        // 안전 범위를 적용하기 전의 계산값. 직접 지정한 목표면 targetCalories() 와 같다.
+        double rawCalories() const { return rawCalories_; }
 
         // 목표 - 먹은 양. 음수면 그만큼 초과한 것이다.
         Macros remaining(const Macros& consumed) const;
 
     private:
+        NutritionGoal(Macros target, double rawCalories, GoalAdjustment adjustment);
+
         Macros target_;
+        double rawCalories_;
+        GoalAdjustment adjustment_;
     };
 
     // ---------- 목표 + 기록 + 잔여를 함께 들고 있는 하루 단위 장부 ----------

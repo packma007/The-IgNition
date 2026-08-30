@@ -12,6 +12,7 @@
 #include "delivery.h"
 #include "dispatch.h"
 #include "inventory.h"
+#include "view.h"
 
 using namespace domains;
 
@@ -108,11 +109,87 @@ int main() {
     ck(bd.dateFor(Date(2026,6,15), TimeOfDay(7,0)) == Date(2026,6,15), "07:00 -> same day");
 
     std::printf("[User goal]\n");
-    User u("kim", 27, Gender::Male, "a@b.com", 72, 178, 18);
-    NutritionGoal g = NutritionGoal::forUser(u, ActivityLevel::Moderate);
+    User u("kim", 27, Gender::Male, "a@b.com", 72, 178, 18, ActivityLevel::Moderate);
+    NutritionGoal g = NutritionGoal::forUser(u);
     double expect = u.bmr() * 1.55;
     ck(near(g.targetCalories(), expect), "target kcal = bmr x 1.55");
-    ck(near(g.target().proteinG, expect * 0.30 / 4.0), "protein g from 30% split");
+    ck(u.activityLevel() == ActivityLevel::Moderate, "activity level lives on the user");
+    ck(near(u.tdee(), expect), "tdee() = bmr x activity factor");
+    ck(near(NutritionGoal::forUser(u, ActivityLevel::Moderate).targetCalories(), expect),
+       "explicit level matches the user's own level");
+
+    // 단백질은 열량의 비율이 아니라 기준 체중 x g/kg 으로 잡는다
+    ck(near(u.referenceWeightKg(), 72.0), "ref weight = body weight at 18% fat (LBM/0.8 > W)");
+    ck(near(g.target().proteinG, 72.0 * 1.4), "protein = 72kg x 1.4 g/kg (Moderate)");
+    ck(near(g.target().calories(), expect), "carb+protein+fat still add up to the target");
+    ck(g.adjustment() == GoalAdjustment::None && !g.wasAdjusted(), "goal not adjusted");
+
+    {   // 활동량이 3배 가까이 올라도 단백질은 g/kg 범위 안에서만 움직인다
+        User quiet("a", 30, Gender::Female, "a@b.com", 60, 165, 0, ActivityLevel::Sedentary);
+        User hard ("b", 30, Gender::Female, "a@b.com", 60, 165, 0, ActivityLevel::VeryActive);
+        double lo = NutritionGoal::forUser(quiet).target().proteinG / 60.0;
+        double hi = NutritionGoal::forUser(hard ).target().proteinG / 60.0;
+        ck(near(lo, 1.0) && near(hi, 1.8), "protein 1.0 -> 1.8 g/kg, not 2.0 -> 3.1");
+        ck(hi <= 2.2 * 60.0 / 60.0, "protein stays under the 2.2 g/kg ceiling");
+    }
+
+    {   // 체지방률을 입력했다고 목표가 크게 튀면 안 된다 (두 공식을 섞는다)
+        User noBf("c", 25, Gender::Male, "a@b.com", 70, 175, 0, ActivityLevel::Moderate);
+        User bf25("d", 25, Gender::Male, "a@b.com", 70, 175, 25, ActivityLevel::Moderate);
+        double jump = std::fabs(NutritionGoal::forUser(noBf).targetCalories()
+                              - NutritionGoal::forUser(bf25).targetCalories());
+        ck(jump < 150.0, "entering body fat moves the goal by <150kcal (was ~263)");
+        ck(bf25.bmrFormula() == BmrFormula::Blended, "known body fat -> blended formula");
+        ck(noBf.bmrFormula() == BmrFormula::MifflinStJeor, "unknown body fat -> Mifflin only");
+        ck(bf25.bmrBy(BmrFormula::KatchMcArdle) < bf25.bmr()
+           && bf25.bmr() < bf25.bmrBy(BmrFormula::MifflinStJeor),
+           "blended value sits between the two formulas");
+        // 체지방이 많으면 단백질 기준 체중이 실제 체중보다 낮다
+        ck(bf25.referenceWeightKg() < 70.0, "25% body fat lowers the protein reference weight");
+    }
+
+    {   // 안전 하한: 작고 나이 많고 거의 안 움직이는 경우
+        User tiny("e", 60, Gender::Female, "a@b.com", 45, 155, 0, ActivityLevel::Sedentary);
+        NutritionGoal tg = NutritionGoal::forUser(tiny);
+        ck(tg.rawCalories() < 1200.0, "raw calculation lands under 1200kcal");
+        ck(near(tg.targetCalories(), 1200.0), "goal raised to the 1200kcal floor");
+        ck(tg.adjustment() == GoalAdjustment::RaisedToFloor, "floor is reported, not silent");
+        ck(!view::formatGoalNotice(tg).empty(), "the UI gets a sentence explaining it");
+        ck(view::formatGoalNotice(g).empty(), "no notice when nothing was adjusted");
+    }
+
+    {   // 오타 방어: 체지방률 19 를 91 로 치면 거부한다
+        bool threw = false;
+        try { User bad("f", 30, Gender::Male, "a@b.com", 70, 175, 91); }
+        catch (const std::exception&) { threw = true; }
+        ck(threw, "91% body fat rejected (typo for 19%)");
+        threw = false;
+        try { User bad("g", 30, Gender::Male, "a@b.com", 70, 175, 1.0); }
+        catch (const std::exception&) { threw = true; }
+        ck(threw, "1% body fat rejected");
+        ck(User("h", 30, Gender::Male, "a@b.com", 70, 175, 0).bodyFatPercent() == 0.0,
+           "0 still means 'unknown', not an error");
+    }
+
+    {   // 성인용 공식을 아이에게 적용하지 않는다
+        User kid("i", 10, Gender::Male, "a@b.com", 35, 140);
+        ck(!kid.isBmrReliable(), "10-year-old is outside the formula's range");
+        bool threw = false;
+        try { NutritionGoal::forUser(kid); }
+        catch (const std::exception&) { threw = true; }
+        ck(threw, "goal refused for under-18 rather than quietly wrong");
+        ck(u.isBmrReliable(), "27-year-old is fine");
+    }
+
+    {   // 몸무게가 바뀌면 목표를 다시 계산할 방법이 있어야 한다
+        User grow("j", 30, Gender::Male, "a@b.com", 70, 175, 0, ActivityLevel::Moderate);
+        Calendar c = Calendar::forUser(grow);
+        double before = c.defaultGoal().targetCalories();
+        grow.setWeightKg(80.0);
+        ck(near(c.defaultGoal().targetCalories(), before), "old goal untouched until asked");
+        c.refreshDefaultGoal(grow);
+        ck(c.defaultGoal().targetCalories() > before, "refreshDefaultGoal picks up the new weight");
+    }
 
     std::printf("[Calendar + photos]\n");
     Calendar cal = Calendar::forUser(u, ActivityLevel::Moderate);
@@ -171,6 +248,118 @@ int main() {
     ck(d1 && near(d1->meals()[0].servings(), 1.5), "servings preserved");
 
     ck(!back.has(Date(2026,6,13)), "reload does NOT re-apply the day boundary");
+
+    {   // 사용자까지 함께 오간다 (v6). 활동량이 살아 남는 것이 핵심이다.
+        User me("kim", 27, Gender::Male, "packma007@gmail.com", 72, 178, 18,
+                ActivityLevel::Active, Location(37.5000, 127.0300, "사무실\t3층"));
+        std::ostringstream withUser;
+        storage::write(cal, MenuBook(), &me, withUser);
+
+        Calendar c = Calendar::forUser(u); UserPtr got;
+        MenuBook mb;
+        std::istringstream src2(withUser.str());
+        storage::read(c, mb, &got, src2);
+
+        ck(got.get() != 0, "USER record read back");
+        ck(got && got->activityLevel() == ActivityLevel::Active, "activity level survived");
+        ck(got && got->name() == "kim" && got->age() == 27, "name and age survived");
+        ck(got && near(got->weightKg(), 72.0) && near(got->heightCm(), 178.0), "body survived");
+        ck(got && near(got->bodyFatPercent(), 18.0), "body fat survived");
+        ck(got && got->gender() == Gender::Male, "gender survived");
+        ck(got && got->email() == "packma007@gmail.com", "email survived");
+        ck(got && got->location().address == "사무실\t3층", "address with a tab survived");
+        ck(got && near(got->location().latitude, 37.5), "delivery location survived");
+        ck(got && near(got->bmr(), me.bmr()), "same bmr after reload");
+        ck(got && near(NutritionGoal::forUser(*got).targetCalories(),
+                       NutritionGoal::forUser(me).targetCalories()),
+           "goal can be recomputed from the reloaded user");
+
+        // 저장해 둔 목표가 아니라 사람에서 다시 계산할 수 있다는 것이 요점이다
+        got->setWeightKg(80.0);
+        c.refreshDefaultGoal(*got);
+        ck(c.defaultGoal().targetCalories() > NutritionGoal::forUser(me).targetCalories(),
+           "reloaded user drives a fresh goal after a weight change");
+    }
+
+    {   // USER 줄이 없는 옛 파일도 그대로 읽힌다
+        Calendar c = Calendar::forUser(u); MenuBook mb; UserPtr got(new User("stale", 30, Gender::Other,
+                                                      "x@y.com", 60, 165));
+        std::istringstream old(saved.str());          // saved 는 USER 없이 쓴 것
+        storage::read(c, mb, &got, old);
+        ck(got.get() == 0, "no USER line -> pointer cleared, not left stale");
+        ck(c.mealCount() == cal.mealCount(), "v4-style file still reads fine");
+    }
+
+    {   // v5 파일의 골격근량 칸은 읽고 버린다. 뒤의 활동량/배달지가 밀리면 안 된다.
+        Calendar c = Calendar::forUser(u); MenuBook mb; UserPtr got;
+        std::istringstream v5("IGNITION\t5\n"
+                             "USER\tkim\t27\t0\ta@b.com\t72\t178\t18\t30.5\t3\t37.5\t127.03\t사무실\n");
+        storage::read(c, mb, &got, v5);
+        ck(got.get() != 0, "v5 USER record still reads");
+        ck(got && got->activityLevel() == ActivityLevel::Active, "v5 activity level not shifted");
+        ck(got && near(got->bodyFatPercent(), 18.0), "v5 body fat kept");
+        ck(got && got->location().address == "사무실", "v5 address not shifted");
+
+        // v6 로 다시 쓰면 칸이 하나 줄어 있다
+        std::ostringstream again;
+        storage::write(c, mb, got.get(), again);
+        ck(again.str().find("30.5") == std::string::npos, "muscle column gone on rewrite");
+    }
+
+    {   // USER 줄이 깨져 있으면 몇 번째 줄인지 알려주며 거부한다
+        Calendar c = Calendar::forUser(u); MenuBook mb; UserPtr got;
+        // 체지방률 칸이 91 - 사람에게 있을 수 없는 값
+        std::istringstream junk("IGNITION\t5\n"
+                                "USER\tkim\t27\t0\ta@b.com\t72\t178\t91\t0\t2\t0\t0\t\n");
+        bool threw = false; std::string msg;
+        try { storage::read(c, mb, &got, junk); }
+        catch (const std::exception& e) { threw = true; msg = e.what(); }
+        ck(threw, "impossible body fat in a file is rejected");
+        ck(msg.find("2") != std::string::npos, "error names the offending line");
+
+        // 활동량 칸이 범위 밖
+        std::istringstream junk2("IGNITION\t5\n"
+                                 "USER\tkim\t27\t0\ta@b.com\t72\t178\t18\t0\t9\t0\t0\t\n");
+        threw = false;
+        try { storage::read(c, mb, &got, junk2); }
+        catch (const std::exception&) { threw = true; }
+        ck(threw, "activity level 9 rejected");
+
+        // 칸이 모자란 경우
+        std::istringstream junk3("IGNITION\t5\nUSER\tkim\t27\n");
+        threw = false;
+        try { storage::read(c, mb, &got, junk3); }
+        catch (const std::exception&) { threw = true; }
+        ck(threw, "short USER record rejected");
+    }
+
+    {   // 사용자를 안 받는 오버로드로 읽어도 USER 줄의 검사는 그대로다
+        User me("kim", 27, Gender::Male, "a@b.com", 72, 178, 18, ActivityLevel::Active);
+        std::ostringstream withUser;
+        storage::write(cal, MenuBook(), &me, withUser);
+        Calendar c = Calendar::forUser(u); MenuBook mb;
+        std::istringstream src3(withUser.str());
+        storage::read(c, mb, src3);                   // user 를 안 넘긴다
+        ck(c.mealCount() == cal.mealCount(), "USER line skipped harmlessly");
+
+        std::istringstream junk("IGNITION\t5\nUSER\tkim\t27\t9\ta@b.com\t72\t178\t0\t0\t2\t0\t0\t\n");
+        bool threw = false;
+        try { storage::read(c, mb, junk); }
+        catch (const std::exception&) { threw = true; }
+        ck(threw, "bad USER line still rejected when the caller ignores it");
+    }
+
+    {   // 파일로도 오간다
+        std::string path = "user_roundtrip_test.ign";
+        std::string err;
+        User me("kim", 27, Gender::Male, "a@b.com", 72, 178, 0, ActivityLevel::VeryActive);
+        ck(storage::save(cal, MenuBook(), &me, path, &err), "save() with a user");
+        Calendar c = Calendar::forUser(u); MenuBook mb; UserPtr got;
+        ck(storage::load(c, mb, &got, path, &err), "load() with a user");
+        ck(got && got->activityLevel() == ActivityLevel::VeryActive,
+           "activity level survived a real file");
+        std::remove(path.c_str());
+    }
 
     {   // malformed input is rejected with a line number, not silently accepted
         Calendar bad = Calendar::forUser(u);
@@ -1203,8 +1392,8 @@ int main() {
         ck(near(d, haversineMeters(seolleung, gangnam)), "distance is symmetric");
     }
     {
-        User loc("kim", 27, Gender::Male, "a@b.com", 72, 178, 18, 0,
-                 Location(37.5000, 127.0300, "office"));
+        User loc("kim", 27, Gender::Male, "a@b.com", 72, 178, 18,
+                 ActivityLevel::Light, Location(37.5000, 127.0300, "office"));
         ck(loc.hasLocation(), "user carries a delivery location");
         ck(loc.location().address == "office", "address kept");
         User noLoc("park", 30, Gender::Female, "c@d.com", 60, 165);

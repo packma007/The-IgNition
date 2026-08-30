@@ -27,9 +27,11 @@ namespace domains {
         // 정확히 하려면 setGoalFor() 로 그날의 목표를 따로 넣어 준다.
         explicit Calendar(NutritionGoal defaultGoal);
 
-        static Calendar forUser(const User& user,
-                                ActivityLevel level = ActivityLevel::Light,
-                                MacroRatio ratio = MacroRatio{});
+        // 활동량은 user.activityLevel() 에서 온다.
+        // level 을 넘기면 그것을 쓰되 사용자 정보는 바꾸지 않는다.
+        // 탄/단/지 비율까지 직접 정하려면 Calendar(NutritionGoal::forUser(...)) 를 쓴다.
+        static Calendar forUser(const User& user);
+        static Calendar forUser(const User& user, ActivityLevel level);
 
         // ---- 하루 꺼내기 ----
         Day& day(const Date& date);                  // 없으면 새로 만든다
@@ -77,6 +79,11 @@ namespace domains {
 
         const NutritionGoal& defaultGoal() const { return defaultGoal_; }
         void setDefaultGoal(NutritionGoal goal) { defaultGoal_ = goal; }
+
+        // 몸무게나 활동량이 바뀐 뒤 기본 목표를 다시 계산한다.
+        // User 를 고쳐도 이미 만들어진 목표는 따라오지 않으므로 직접 불러 주어야 한다.
+        // 이미 만들어진 날들의 목표는 그대로 둔다 (그날의 기록은 그날의 목표로 남는다).
+        void refreshDefaultGoal(const User& user);
         void setGoalFor(const Date& date, NutritionGoal goal);
 
     private:

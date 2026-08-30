@@ -2,6 +2,8 @@
 #include <cmath>
 #include <stdexcept>
 #include <utility>
+#include <sstream>
+#include <algorithm>
 
 namespace domains {
 
@@ -191,15 +193,45 @@ namespace domains {
 
     // ---------- 목표 ----------
 
-    double activityFactor(ActivityLevel level) {
-        switch (level) {
-            case ActivityLevel::Sedentary:  return 1.200;
-            case ActivityLevel::Light:      return 1.375;
-            case ActivityLevel::Moderate:   return 1.550;
-            case ActivityLevel::Active:     return 1.725;
-            case ActivityLevel::VeryActive: return 1.900;
+    const double kRemainderCarbShare = 0.70;
+    const double kMaxProteinShare    = 0.40;
+
+    namespace {
+        // 목표 열량을 안전 범위 안으로 자른다.
+        double clampToSafeRange(double kcal, Gender g, GoalAdjustment& how) {
+            double floorKcal = minimumDailyCalories(g);
+            if (kcal < floorKcal) {
+                how = GoalAdjustment::RaisedToFloor;
+                return floorKcal;
+            }
+            if (kcal > kMaximumDailyCalories) {
+                how = GoalAdjustment::LoweredToCap;
+                return kMaximumDailyCalories;
+            }
+            how = GoalAdjustment::None;
+            return kcal;
         }
-        return 1.375;
+
+        // 단백질을 g 으로 먼저 확정한다.
+        double proteinGramsFor(const User& user, ActivityLevel level, double kcal) {
+            double refKg  = user.referenceWeightKg();
+            double wanted = refKg * proteinPerKgFor(level);
+
+            // 열량이 낮을 때 접시가 단백질로만 차지 않게 위를 자르고,
+            // 그래도 RDA(0.8 g/kg) 아래로는 내리지 않는다.
+            double cap     = kcal * kMaxProteinShare / kProteinKcal;
+            double rdaFloor = refKg * 0.8;
+            return std::max(rdaFloor, std::min(wanted, cap));
+        }
+
+        // 단백질을 뺀 나머지 열량을 탄수화물과 지방으로 나눈다.
+        Macros splitCalories(double kcal, double proteinG) {
+            double rest = kcal - proteinG * kProteinKcal;
+            if (rest < 0.0) rest = 0.0;
+            return Macros(rest * kRemainderCarbShare / kCarbKcal,
+                          proteinG,
+                          rest * (1.0 - kRemainderCarbShare) / kFatKcal);
+        }
     }
 
     MacroRatio::MacroRatio(double carb, double protein, double fat)
@@ -210,18 +242,62 @@ namespace domains {
             throw std::invalid_argument("macro ratio must sum to 1.0");
     }
 
-    NutritionGoal::NutritionGoal(Macros target) : target_(target) {
+    NutritionGoal::NutritionGoal(Macros target)
+        : target_(target),
+          rawCalories_(target.calories()),
+          adjustment_(GoalAdjustment::None) {
         if (target_.carbG < 0.0 || target_.proteinG < 0.0 || target_.fatG < 0.0)
             throw std::invalid_argument("target macros must be >= 0");
     }
 
-    NutritionGoal NutritionGoal::forUser(const User& user,
-                                         ActivityLevel level,
+    NutritionGoal::NutritionGoal(Macros target, double rawCalories,
+                                 GoalAdjustment adjustment)
+        : target_(target), rawCalories_(rawCalories), adjustment_(adjustment) {}
+
+    namespace {
+        // 성인용 공식의 적용 범위를 벗어난 나이는 여기서 막는다.
+        void checkAdultAge(const User& user) {
+            if (user.isBmrReliable()) return;
+            std::ostringstream o;
+            o << "만 " << kMinAdultAge << "세 미만(" << user.age()
+              << "세)에는 성인용 기초대사량 공식을 쓸 수 없습니다";
+            throw std::invalid_argument(o.str());
+        }
+    }
+
+    NutritionGoal NutritionGoal::forUser(const User& user) {
+        return forUser(user, user.activityLevel());
+    }
+
+    NutritionGoal NutritionGoal::forUser(const User& user, MacroRatio ratio) {
+        return forUser(user, user.activityLevel(), ratio);
+    }
+
+    // 기본 방식: 단백질을 g 으로 먼저 잡고 나머지를 탄/지로 나눈다
+    NutritionGoal NutritionGoal::forUser(const User& user, ActivityLevel level) {
+        checkAdultAge(user);
+
+        double raw = user.bmr() * activityFactor(level);
+        GoalAdjustment how = GoalAdjustment::None;
+        double kcal = clampToSafeRange(raw, user.gender(), how);
+
+        return NutritionGoal(splitCalories(kcal, proteinGramsFor(user, level, kcal)),
+                             raw, how);
+    }
+
+    // 비율을 직접 지정한 경우: 그 비율을 그대로 지킨다
+    NutritionGoal NutritionGoal::forUser(const User& user, ActivityLevel level,
                                          MacroRatio ratio) {
-        double kcal = user.bmr() * activityFactor(level);
+        checkAdultAge(user);
+
+        double raw = user.bmr() * activityFactor(level);
+        GoalAdjustment how = GoalAdjustment::None;
+        double kcal = clampToSafeRange(raw, user.gender(), how);
+
         return NutritionGoal(Macros(kcal * ratio.carb    / kCarbKcal,
                                     kcal * ratio.protein / kProteinKcal,
-                                    kcal * ratio.fat     / kFatKcal));
+                                    kcal * ratio.fat     / kFatKcal),
+                             raw, how);
     }
 
     Macros NutritionGoal::remaining(const Macros& consumed) const {

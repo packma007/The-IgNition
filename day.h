@@ -19,11 +19,10 @@ namespace domains {
     public:
         Day(Date date, NutritionGoal goal);
 
-        // 사용자 정보에서 목표를 뽑아 하루를 만드는 간편 함수
-        static Day forUser(Date date,
-                           const User& user,
-                           ActivityLevel level = ActivityLevel::Light,
-                           MacroRatio ratio = MacroRatio{});
+        // 사용자 정보에서 목표를 뽑아 하루를 만드는 간편 함수.
+        // 활동량은 user.activityLevel() 에서 온다.
+        static Day forUser(Date date, const User& user);
+        static Day forUser(Date date, const User& user, ActivityLevel level);
 
         const Date& date() const { return date_; }
         void setDate(Date date) { date_ = date; }

@@ -22,7 +22,7 @@ call "%VCVARS%" >nul 2>&1
 cd /d "%~dp0"
 if not exist build mkdir build
 
-set SRC=inventory.c++ location.c++ delivery.c++ dispatch.c++ datetime.c++ photo.c++ intake.c++ day.c++ calendar.c++ storage.c++ recommend.c++ weeklymenu.c++ menuseed.c++ food.c++ foodcsv.c++ domains.c++ user.c++ format.c++
+set SRC=inventory.c++ location.c++ delivery.c++ dispatch.c++ datetime.c++ photo.c++ intake.c++ day.c++ calendar.c++ storage.c++ recommend.c++ weeklymenu.c++ menuseed.c++ food.c++ foodcsv.c++ domains.c++ user.c++ format.c++ view.c++ input.c++
 set FLAGS=/TP /utf-8 /EHsc /W3 /std:c++14 /nologo
 
 if /i "%~1"=="test" (
@@ -33,8 +33,11 @@ if /i "%~1"=="test" (
     cl %FLAGS% /Fo:build\ /Fe:build\test.exe test.c++ %SRC%
     if errorlevel 1 exit /b 1
     echo.
+    REM %errorlevel% inside a parenthesized block is expanded when the block is
+    REM parsed, i.e. before test.exe has run. "if errorlevel" reads it live.
     build\test.exe
-    exit /b %errorlevel%
+    if errorlevel 1 exit /b 1
+    exit /b 0
 )
 
 cl /c %FLAGS% /Fo:build\ %SRC%

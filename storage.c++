@@ -11,7 +11,8 @@ namespace domains {
 namespace storage {
 
     // v2: MEAL 에 출처, v3: 확인 여부, v4: 주간 메뉴판(WEEKMENU/WMENU/WNUTRIENT)
-    const int kFormatVersion = 4;
+    // v5: USER (몸 정보 + 활동량 + 배달지), v6: USER 에서 골격근량 칸을 뺌
+    const int kFormatVersion = 6;
 
     namespace {
 
@@ -148,6 +149,66 @@ namespace storage {
             return v;
         }
 
+        // ---- 사용자 ----
+
+        int fromGender(Gender g) {
+            switch (g) {
+                case Gender::Male:   return 0;
+                case Gender::Female: return 1;
+                default:             return 2;
+            }
+        }
+
+        Gender toGender(int v, std::size_t lineNo) {
+            switch (v) {
+                case 0: return Gender::Male;
+                case 1: return Gender::Female;
+                case 2: return Gender::Other;
+            }
+            fail(lineNo, "성별 값이 0..2 가 아닙니다");
+            return Gender::Other;   // fail 이 예외를 던지므로 여기까지 오지 않는다
+        }
+
+        int fromActivity(ActivityLevel l) {
+            switch (l) {
+                case ActivityLevel::Sedentary:  return 0;
+                case ActivityLevel::Light:      return 1;
+                case ActivityLevel::Moderate:   return 2;
+                case ActivityLevel::Active:     return 3;
+                default:                        return 4;
+            }
+        }
+
+        ActivityLevel toActivity(int v, std::size_t lineNo) {
+            switch (v) {
+                case 0: return ActivityLevel::Sedentary;
+                case 1: return ActivityLevel::Light;
+                case 2: return ActivityLevel::Moderate;
+                case 3: return ActivityLevel::Active;
+                case 4: return ActivityLevel::VeryActive;
+            }
+            fail(lineNo, "활동량 값이 0..4 가 아닙니다");
+            return ActivityLevel::Light;   // 여기까지 오지 않는다
+        }
+
+        // 사용자 한 명을 한 줄로 적는다.
+        // 활동량이 여기 들어가는 것이 핵심이다. 이것이 없으면 다시 켰을 때
+        // 몸 정보가 바뀌어도 목표를 새로 계산할 방법이 없다.
+        void writeUser(const User& u, std::ostream& out) {
+            const Location& loc = u.location();
+            out << "USER" << kSep << esc(u.name())
+                << kSep << u.age()
+                << kSep << fromGender(u.gender())
+                << kSep << esc(u.email())
+                << kSep << num(u.weightKg())
+                << kSep << num(u.heightCm())
+                << kSep << num(u.bodyFatPercent())
+                << kSep << fromActivity(u.activityLevel())
+                << kSep << num(loc.latitude)
+                << kSep << num(loc.longitude)
+                << kSep << esc(loc.address) << "\n";
+        }
+
         // ---- 주간 메뉴판 ----
 
         int fromDivisibility(Divisibility d) {
@@ -211,8 +272,12 @@ namespace storage {
 
     // ---------- 쓰기 ----------
 
-    void write(const Calendar& calendar, const MenuBook& menus, std::ostream& out) {
+    void write(const Calendar& calendar, const MenuBook& menus,
+               const User* user, std::ostream& out) {
         out << "IGNITION" << kSep << kFormatVersion << "\n";
+
+        // 누구의 기록인지를 맨 앞에 적는다.
+        if (user) writeUser(*user, out);
 
         const DayBoundary& b = calendar.boundary();
         out << "BOUNDARY" << kSep << b.start.hour << kSep << b.start.minute << "\n";
@@ -274,9 +339,12 @@ namespace storage {
 
     // ---------- 읽기 ----------
 
-    void read(Calendar& calendar, MenuBook& menus, std::istream& in) {
+    void read(Calendar& calendar, MenuBook& menus, UserPtr* user, std::istream& in) {
         calendar.clear();
         menus.clear();
+        // 앞서 읽어 둔 사람이 남아 있지 않게 비운다.
+        // USER 줄이 없는 파일을 읽고 나면 널이어야 한다.
+        if (user) user->reset();
 
         std::string line;
         std::size_t lineNo = 0;
@@ -314,7 +382,33 @@ namespace storage {
                 continue;
             }
 
-            if (tag == "BOUNDARY") {
+            if (tag == "USER") {
+                // v5 까지는 체지방률 뒤에 골격근량 칸이 하나 더 있었다.
+                // 어디에도 쓰이지 않던 값이라 v6 에서 뺐고, 옛 파일에서는 읽고 버린다.
+                std::size_t m = fileVersion >= 6 ? 0 : 1;
+                needFields(f, 12 + m, lineNo, "USER");
+                try {
+                    User u(unesc(f[1]),
+                           toInt(f[2], lineNo),
+                           toGender(toInt(f[3], lineNo), lineNo),
+                           unesc(f[4]),
+                           toDouble(f[5], lineNo),
+                           toDouble(f[6], lineNo),
+                           toDouble(f[7], lineNo),
+                           toActivity(toInt(f[8 + m], lineNo), lineNo),
+                           Location(toDouble(f[9 + m], lineNo),
+                                    toDouble(f[10 + m], lineNo),
+                                    unesc(f[11 + m])));
+                    // user 가 널이면 줄은 검사하되 결과는 버린다.
+                    // 형식이 틀린 줄은 누가 읽든 예외가 되어야 한다.
+                    if (user) user->reset(new User(u));
+                } catch (const std::runtime_error&) {
+                    throw;                       // fail() 이 던진 것은 그대로 내보낸다
+                } catch (const std::exception& e) {
+                    fail(lineNo, e.what());      // 나머지는 몇 번째 줄인지를 붙여 준다
+                }
+
+            } else if (tag == "BOUNDARY") {
                 needFields(f, 3, lineNo, "BOUNDARY");
                 calendar.setBoundary(DayBoundary(
                     TimeOfDay(toInt(f[1], lineNo), toInt(f[2], lineNo))));
@@ -442,7 +536,7 @@ namespace storage {
 
     // ---------- 파일 ----------
 
-    bool save(const Calendar& calendar, const MenuBook& menus,
+    bool save(const Calendar& calendar, const MenuBook& menus, const User* user,
               const std::string& path, std::string* error) {
         std::ofstream out(path.c_str());
         if (!out) {
@@ -450,7 +544,7 @@ namespace storage {
             return false;
         }
         try {
-            write(calendar, menus, out);
+            write(calendar, menus, user, out);
         } catch (const std::exception& e) {
             if (error) *error = e.what();
             return false;
@@ -463,7 +557,7 @@ namespace storage {
         return true;
     }
 
-    bool load(Calendar& calendar, MenuBook& menus,
+    bool load(Calendar& calendar, MenuBook& menus, UserPtr* user,
               const std::string& path, std::string* error) {
         std::ifstream in(path.c_str());
         if (!in) {
@@ -471,7 +565,7 @@ namespace storage {
             return false;
         }
         try {
-            read(calendar, menus, in);
+            read(calendar, menus, user, in);
         } catch (const std::exception& e) {
             if (error) *error = path + " - " + e.what();
             return false;
@@ -479,18 +573,36 @@ namespace storage {
         return true;
     }
 
+    bool save(const Calendar& calendar, const MenuBook& menus,
+              const std::string& path, std::string* error) {
+        return save(calendar, menus, 0, path, error);
+    }
+
+    bool load(Calendar& calendar, MenuBook& menus,
+              const std::string& path, std::string* error) {
+        return load(calendar, menus, 0, path, error);
+    }
+
     // ---------- 메뉴판이 필요 없을 때 ----------
 
     // 쓸 때는 빈 메뉴판을 넣고, 읽을 때는 WEEKMENU 를 읽고 버린다.
     // 버릴지언정 건너뛰지는 않는다 - 형식이 틀린 줄은 여기서도 예외가 되어야 한다.
 
+    void write(const Calendar& calendar, const MenuBook& menus, std::ostream& out) {
+        write(calendar, menus, 0, out);
+    }
+
+    void read(Calendar& calendar, MenuBook& menus, std::istream& in) {
+        read(calendar, menus, 0, in);
+    }
+
     void write(const Calendar& calendar, std::ostream& out) {
-        write(calendar, MenuBook(), out);
+        write(calendar, MenuBook(), 0, out);
     }
 
     void read(Calendar& calendar, std::istream& in) {
         MenuBook discarded;
-        read(calendar, discarded, in);
+        read(calendar, discarded, 0, in);
     }
 
     bool save(const Calendar& calendar, const std::string& path, std::string* error) {

@@ -6,11 +6,12 @@ namespace domains {
     Day::Day(Date date, NutritionGoal goal)
         : date_(date), nutrition_(goal) {}
 
-    Day Day::forUser(Date date,
-                     const User& user,
-                     ActivityLevel level,
-                     MacroRatio ratio) {
-        return Day(date, NutritionGoal::forUser(user, level, ratio));
+    Day Day::forUser(Date date, const User& user) {
+        return Day(date, NutritionGoal::forUser(user));
+    }
+
+    Day Day::forUser(Date date, const User& user, ActivityLevel level) {
+        return Day(date, NutritionGoal::forUser(user, level));
     }
 
     bool Day::owns(const Date& calendarDate,

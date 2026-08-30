@@ -7,10 +7,16 @@ namespace domains {
     Calendar::Calendar(NutritionGoal defaultGoal)
         : defaultGoal_(defaultGoal) {}
 
-    Calendar Calendar::forUser(const User& user,
-                               ActivityLevel level,
-                               MacroRatio ratio) {
-        return Calendar(NutritionGoal::forUser(user, level, ratio));
+    Calendar Calendar::forUser(const User& user) {
+        return Calendar(NutritionGoal::forUser(user));
+    }
+
+    Calendar Calendar::forUser(const User& user, ActivityLevel level) {
+        return Calendar(NutritionGoal::forUser(user, level));
+    }
+
+    void Calendar::refreshDefaultGoal(const User& user) {
+        defaultGoal_ = NutritionGoal::forUser(user);
     }
 
     // ---------- 하루 꺼내기 ----------

@@ -34,6 +34,7 @@ namespace input {
 
     // ---- 도메인 객체 ----
     Gender readGender(std::istream& in, std::ostream& out);
+    ActivityLevel readActivityLevel(std::istream& in, std::ostream& out);
     User readUser(std::istream& in, std::ostream& out);
     MenuPtr readMenu(std::istream& in, std::ostream& out);
 
