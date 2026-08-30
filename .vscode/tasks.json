@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "빌드",
+            "type": "process",
+            "command": "C:/Program Files/Git/bin/bash.exe",
+            "args": ["build.sh"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$gcc"],
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+        },
+        {
+            "label": "빌드 후 실행",
+            "type": "process",
+            "command": "C:/Program Files/Git/bin/bash.exe",
+            "args": ["build.sh", "run"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"],
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+        },
+        {
+            "label": "정리",
+            "type": "process",
+            "command": "C:/Program Files/Git/bin/bash.exe",
+            "args": ["build.sh", "clean"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
+        }
+    ]
+}
