@@ -11,6 +11,7 @@
 #include "foodcsv.h"
 #include "delivery.h"
 #include "dispatch.h"
+#include "inventory.h"
 
 using namespace domains;
 
@@ -527,6 +528,298 @@ int main() {
         ck(a.isWithinTolerance() == b.isWithinTolerance(), "초록불/빨간불이 갈리지 않는다");
     }
 
+    std::printf("[영양성분이 항목별로 실려 나온다]\n");
+    {
+        Plan p = planner.solve(picks, budget);
+        ck(p.nutrients.size() >= 3, "탄단지 세 줄은 언제나 있다");
+        ck(p.nutrients[0].name == "탄수화물" && p.nutrients[1].name == "단백질"
+           && p.nutrients[2].name == "지방", "화면에서 늘 같은 자리");
+        ck(p.nutrients[0].unit == "g", "단위까지 실려 있다");
+        ck(near(p.nutrientAmount("탄수화물"), p.macros.carbG), "합계와 어긋나지 않는다");
+        ck(near(p.nutrientAmount("단백질"),  p.macros.proteinG), "단백질도 마찬가지");
+        ck(near(p.nutrientAmount("지방"),    p.macros.fatG),     "지방도 마찬가지");
+        ck(near(p.nutrient("단백질")->calories, p.macros.proteinG * 4.0),
+           "영양소별 열량도 같이 나온다");
+        ck(p.nutrient("없는영양소") == 0, "없는 영양소는 널");
+        ck(near(p.nutrientAmount("없는영양소"), 0.0), "널 대신 0 을 물어볼 수도 있다");
+
+        // 탄단지 말고 다른 영양소가 붙은 메뉴가 섞여도 버리지 않는다
+        MenuPtr salty(new ContinuousMenu("소금국", "g", 1, 100.0, 300.0, 100.0));
+        salty->addNutrient<Protein>(0.01);
+        planner.addMenu(p, salty);
+        ck(p.nutrients.size() == 3, "새 영양소가 없으면 줄이 늘지 않는다");
+    }
+
+    std::printf("[유저가 메뉴 구성을 바꾼다 - 그 자리에서 다시 계산된다]\n");
+    {
+        MenuPtr egg(new DiscreteMenu("egg", "개", 800, 1, 1));
+        egg->addNutrient<Protein>(6.0);
+        egg->addNutrient<Fat>(5.0);
+
+        Plan p = planner.solve(picks, budget);          // rice / chicken / salad
+        double kcal0 = p.calories;
+        double carb0 = p.nutrientAmount("탄수화물");
+        long long price0 = p.price;
+        double riceAmount = p.items[0].amount;
+
+        // ---- 넣는다 ----
+        std::size_t at = planner.addMenu(p, egg);
+        ck(p.itemCount() == 4, "고른 가짓수가 늘었다");
+        ck(at == 3 && p.items[3].menu->name() == "egg", "넣은 자리를 알려 준다");
+        ck(p.contains("egg") && p.indexOf("egg") == 3, "이름으로도 찾힌다");
+        ck(p.calories > kcal0 - 1e-9, "열량이 그 자리에서 다시 계산된다");
+        ck(p.nutrientAmount("단백질") > 0.0 && near(p.nutrientAmount("단백질"), p.macros.proteinG),
+           "영양성분도 같이 움직인다");
+        ck(p.price > price0, "값도 같이 오른다");
+        ck(near(p.items[0].amount, riceAmount),
+           "남의 양은 건드리지 않는다 - 유저가 맞춰 둔 값이 살아 있다");
+        ck(p.items[3].amount >= p.items[3].minAmount &&
+           p.items[3].menu->isValidAmount(p.items[3].amount),
+           "새 항목의 양도 실제로 팔 수 있는 양이다");
+        ck(p.items[3].nudgeStep > 0.0 && p.items[3].unit() == "개",
+           "넣자마자 +/- 로 조절할 수 있다");
+
+        Macros sum;
+        for (std::size_t i = 0; i < p.items.size(); ++i) sum += p.items[i].macros;
+        ck(near(sum.calories(), p.calories), "항목을 더하면 합계가 된다 - 넣은 뒤에도");
+
+        ck(planner.addMenu(p, egg) == 3 && p.itemCount() == 4,
+           "같은 메뉴를 또 넣어도 두 줄이 되지 않는다");
+
+        // ---- 뺀다 ----
+        double withEgg = p.calories;
+        double eggKcal = p.items[3].macros.calories();
+        ck(planner.removeMenu(p, "egg"), "이름으로 뺀다");
+        ck(p.itemCount() == 3 && !p.contains("egg"), "빠졌다");
+        ck(near(p.calories, withEgg - eggKcal), "뺀 만큼 정확히 줄어든다");
+        ck(near(p.nutrientAmount("탄수화물"), carb0), "영양성분도 제자리로");
+        ck(near(p.items[0].amount, riceAmount), "남은 항목의 양은 그대로");
+        ck(!planner.removeMenu(p, "없는메뉴"), "없는 메뉴를 빼면 false");
+
+        // ---- 갈아끼운다 ----
+        std::string was = p.items[2].menu->name();
+        planner.replaceItem(p, 2, egg);
+        ck(p.itemCount() == 3, "가짓수는 그대로");
+        ck(p.items[2].menu->name() == "egg" && !p.contains(was), "그 자리만 바뀐다");
+        ck(near(p.items[0].amount, riceAmount), "다른 자리는 그대로");
+        {
+            Macros s2;
+            for (std::size_t i = 0; i < p.items.size(); ++i) s2 += p.items[i].macros;
+            ck(near(s2.calories(), p.calories), "갈아끼운 뒤에도 합계가 맞다");
+        }
+        {
+            bool threw = false;
+            try { planner.replaceItem(p, 0, egg); }
+            catch (const std::exception&) { threw = true; }
+            ck(threw, "이미 담긴 메뉴로 갈아끼우면 같은 메뉴가 두 줄이 되므로 예외");
+        }
+
+        // ---- 목표만 바뀌었을 때 ----
+        double delta0 = p.calorieDelta;
+        planner.setTarget(p, Macros(40, 25, 10));
+        ck(near(p.targetCalories, Macros(40,25,10).calories()), "목표가 옮겨진다");
+        ck(p.calorieDelta > delta0, "양은 그대로인데 경고 기준만 옮겨졌다");
+
+        // ---- 다시 추천해 줘 ----
+        planner.setTarget(p, budget);
+        planner.setAmount(p, 0, p.items[0].minAmount);   // 일부러 어긋나게 해 놓고
+        double before2 = p.score;
+
+        planner.rebalance(p);
+        ck(p.itemCount() == 3, "구성은 그대로 두고 양만 다시 푼다");
+        ck(p.menuNames().size() == 3 && p.menuNames()[2] == "egg", "구성이 바뀌지 않았다");
+        ck(p.score <= before2 + 1e-9, "다시 풀면 나빠지지 않는다");
+        {
+            bool sellable2 = true;
+            for (std::size_t i = 0; i < p.items.size(); ++i)
+                if (!p.items[i].menu->isValidAmount(p.items[i].amount)) sellable2 = false;
+            ck(sellable2, "다시 푼 양도 모두 팔 수 있는 양이다");
+        }
+        {
+            // 손으로 고쳐 온 조합이라고 해서 처음부터 푼 것보다 못하지 않아야 한다
+            std::vector<Pick> same;
+            for (std::size_t i = 0; i < p.items.size(); ++i)
+                same.push_back(Pick(p.items[i].menu));
+            Plan fresh = planner.solve(same, budget);
+            ck(p.score <= fresh.score + 1e-6,
+               "손으로 고친 조합도 처음부터 푼 것만큼 맞춰 준다");
+        }
+    }
+
+    std::printf("[고치는 도중에는 막지 않고, 확정만 잠근다]\n");
+    {
+        Plan p = planner.solve(picks, budget);
+        ck(p.isValidComposition() && p.compositionWarning().empty(), "3가지는 확정할 수 있다");
+        ck(p.canAddMenu(), "아직 더 넣을 자리가 있다");
+        ck(!p.canRemoveMenu(), "3가지에서 하나 빼면 확정이 잠긴다고 미리 알려 준다");
+
+        planner.removeItem(p, 0);
+        ck(p.itemCount() == 2, "2가지로 줄이는 것 자체는 막지 않는다");
+        ck(!p.isValidComposition(), "다만 확정 버튼은 잠긴다");
+        ck(!p.compositionWarning().empty(), "왜 잠겼는지 화면에 띄울 문구가 나온다");
+        ck(!p.canRemoveMenu(), "여기서 더 빼자고 하지는 않는다");
+        ck(p.calories > 0.0 && near(p.nutrientAmount("단백질"), p.macros.proteinG),
+           "가짓수가 모자라도 숫자는 계속 살아 움직인다");
+
+        {
+            bool threw = false;
+            try { planner.removeItem(p, 9); }
+            catch (const std::exception&) { threw = true; }
+            ck(threw, "없는 자리를 빼려 하면 예외");
+        }
+
+        // 9가지까지 채우고 나면 더는 못 넣는다
+        for (int i = 0; p.itemCount() < MealPlanner::maxPicks(); ++i) {
+            std::ostringstream nm;
+            nm << "extra-" << i;
+            MenuPtr e(new ContinuousMenu(nm.str(), "g", 2, 10.0, 100.0, 10.0));
+            e->addNutrient<Carbohydrate>(0.1);
+            planner.addMenu(p, e);
+        }
+        ck(p.itemCount() == MealPlanner::maxPicks(), "9가지까지 담았다");
+        ck(p.isValidComposition() && !p.canAddMenu(), "확정은 되지만 더 넣을 자리는 없다");
+        {
+            MenuPtr tenth(new ContinuousMenu("tenth", "g", 2, 10.0, 100.0, 10.0));
+            tenth->addNutrient<Carbohydrate>(0.1);
+            bool threw = false;
+            try { planner.addMenu(p, tenth); }
+            catch (const std::exception&) { threw = true; }
+            ck(threw, "10번째는 조용히 버려지지 않고 예외");
+            ck(p.itemCount() == MealPlanner::maxPicks(), "담긴 것도 그대로다");
+        }
+    }
+
+    std::printf("[예산: 값도 저울에 올린다]\n");
+    {
+        ck(!Budget().isSet(), "예산을 안 걸면 안 건 것이다");
+        ck(Budget(9000).isSet() && Budget(9000).limit == 9000, "선을 그으면 그어진다");
+        ck(near(Budget(9000).weight, 1.0), "기본 저울눈은 지방과 같은 무게");
+        {
+            bool threw = false;
+            try { Budget(-1); } catch (const std::exception&) { threw = true; }
+            ck(threw, "음수 예산은 예외");
+            threw = false;
+            try { Budget(9000, -0.5); } catch (const std::exception&) { threw = true; }
+            ck(threw, "음수 저울눈도 예외");
+        }
+
+        Plan free_ = planner.solve(picks, budget);              // 예산 없음
+        ck(!free_.budget.isSet() && free_.priceDelta == 0 && near(free_.pricePct, 0.0),
+           "예산을 안 걸면 값 관련 숫자는 0 으로 남는다");
+        ck(free_.isWithinBudget(), "예산이 없으면 언제나 예산 안이다");
+        ck(!free_.has(Issue::PriceOver), "예산이 없으면 초과라는 말도 없다");
+
+        // 예산을 안 걸었을 때와 걸었을 때가 같으면 저울에 올린 것이 아니다
+        long long cap = free_.price - 1500;
+        Plan tight = planner.solve(picks, budget, Budget(cap));
+        ck(tight.price < free_.price, "예산을 걸면 값이 내려간다");
+        ck(tight.budget.limit == cap, "건 예산이 답에 실려 있다");
+
+        // 저울눈을 올리면 값을 더 무겁게 본다
+        Plan heavier = planner.solve(picks, budget, Budget(cap, 8.0));
+        ck(heavier.price <= tight.price, "저울눈을 올리면 더 싸진다");
+
+        // 값을 깎느라 영양을 통째로 버리지는 않는다
+        ck(heavier.calories > free_.calories * 0.5,
+           "싸게 만들라고 끼니를 없애지는 않는다");
+
+        // ---- 넘으면 숨기지 않고 알린다 ----
+        {
+            Plan over = planner.solve(picks, budget, Budget(3000));   // 못 맞추는 예산
+            ck(over.has(Issue::PriceOver), "예산을 넘으면 넘었다고 한다");
+            ck(!over.isWithinBudget(), "예산 안이 아니다");
+            ck(over.priceDelta == over.price - 3000, "얼마나 넘었는지 원 단위로 알려 준다");
+            ck(over.pricePct > 1.0, "예산 대비 비율도 나온다");
+            ck(over.warning().find("예산 초과") != std::string::npos,
+               "화면에 그대로 띄울 문구에 들어간다");
+            ck(over.itemCount() == 3, "그래도 답은 준다 - 막지 않는다");
+            ck(over.isBestEffort(), "맞춘 척하지 않는다");
+        }
+
+        // ---- 예산 안이면 조용하다 ----
+        {
+            Plan roomy = planner.solve(picks, budget, Budget(free_.price + 5000));
+            ck(roomy.isWithinBudget() && !roomy.has(Issue::PriceOver), "넉넉하면 경고가 없다");
+            ck(roomy.priceDelta < 0, "남은 돈은 음수로 나온다");
+            ck(roomy.pricePct < 1.0, "비율도 1 아래");
+            ck(roomy.price == free_.price,
+               "예산이 넉넉하면 값 때문에 답이 흔들리지 않는다 - 벌점이 0 이다");
+        }
+
+        // ---- 항목값을 더하면 합계다 ----
+        {
+            long long sum = 0;
+            for (std::size_t i = 0; i < tight.items.size(); ++i) sum += tight.items[i].price;
+            ck(sum == tight.price, "예산을 걸어도 항목값의 합이 총액이다");
+        }
+    }
+
+    std::printf("[예산도 유저가 바꾼다 - 그 자리에서]\n");
+    {
+        Plan p = planner.solve(picks, budget);
+        double kcal0 = p.calories;
+        double amount0 = p.items[1].amount;
+        long long price0 = p.price;
+
+        // setBudget 은 기준만 옮긴다. 양을 몰래 다시 풀지 않는다.
+        planner.setBudget(p, Budget(price0 - 2000));
+        ck(p.price == price0 && near(p.items[1].amount, amount0),
+           "예산을 걸었다고 담긴 양이 저절로 바뀌지는 않는다");
+        ck(near(p.calories, kcal0), "열량도 그대로");
+        ck(p.has(Issue::PriceOver), "다만 초과 경고가 그 자리에서 켜진다");
+        ck(p.priceDelta == 2000, "얼마나 넘었는지도 바로 나온다");
+
+        // "이 예산에 맞춰 다시 짜 줘" 를 누르면 그때 푼다
+        planner.rebalance(p);
+        ck(p.price < price0, "다시 풀면 예산 쪽으로 내려온다");
+
+        planner.setBudget(p, Budget());
+        ck(!p.has(Issue::PriceOver) && p.priceDelta == 0, "예산을 풀면 경고도 사라진다");
+
+        // 메뉴를 넣을 때 이미 쓴 돈을 본다.
+        // 아직 700kcal 에 한참 못 미치는 판이라, 넣는 메뉴는 많이 담기고 싶어한다.
+        // 그걸 잡아 주는 것이 예산이다.
+        MenuPtr crumb1(new ContinuousMenu("crumb-1", "g", 5, 10.0, 20.0, 10.0));
+        crumb1->addNutrient<Carbohydrate>(0.1);
+        MenuPtr crumb2(new ContinuousMenu("crumb-2", "g", 5, 10.0, 20.0, 10.0));
+        crumb2->addNutrient<Protein>(0.1);
+        MenuPtr crumb3(new ContinuousMenu("crumb-3", "g", 5, 10.0, 20.0, 10.0));
+        crumb3->addNutrient<Fat>(0.1);
+
+        std::vector<Pick> hungry;
+        hungry.push_back(Pick(crumb1));
+        hungry.push_back(Pick(crumb2));
+        hungry.push_back(Pick(crumb3));
+
+        MenuPtr side(new ContinuousMenu("side", "g", 40, 50.0, 300.0, 10.0));
+        side->addNutrient<Protein>(0.20);
+        side->addNutrient<Fat>(0.10);
+
+        Plan roomy2 = planner.solve(hungry, budget, Budget(30000));
+        Plan tight2 = planner.solve(hungry, budget, Budget(4000, 4.0));
+        planner.addMenu(roomy2, side);
+        planner.addMenu(tight2, side);
+        ck(roomy2.items[3].amount > tight2.items[3].amount,
+           "예산이 빠듯하면 새로 얹는 메뉴도 적게 담긴다");
+        ck(tight2.priceDelta == tight2.price - tight2.budget.limit,
+           "넣자마자 초과분이 다시 계산된다");
+        ck(roomy2.isWithinBudget(), "넉넉한 쪽은 넣고도 예산 안이다");
+    }
+
+    std::printf("[고정한 항목의 값도 예산에 든다]\n");
+    {
+        std::vector<Pick> locked;
+        locked.push_back(Pick(rice));
+        locked.push_back(Pick(chicken));
+        locked.push_back(Pick::fixed(salad, 1.0));      // 8,000원짜리 샐러드 고정
+        Plan lp = planner.solve(locked, budget, Budget(10000));
+        long long sum = 0;
+        for (std::size_t i = 0; i < lp.items.size(); ++i) sum += lp.items[i].price;
+        ck(sum == lp.price, "고정된 항목의 값도 총액에 들어간다");
+        ck(lp.items[2].price == 8000, "고정 항목은 값도 고정이다");
+        ck(lp.price >= 8000, "이미 8,000원을 쓴 상태에서 나머지를 푼다");
+    }
+
     std::printf("[그날 남은 영양분으로 바로 풀기]\n");
     Day today(Date(2026,8,30), NutritionGoal(Macros(250, 150, 60)));
     today.addMeal(Meal("breakfast", MealTime::Breakfast, Macros(60, 20, 10)));
@@ -575,15 +868,23 @@ int main() {
         ck(bap && near(macrosOf(*bap, 100.0).proteinG, 3.5), "잡곡밥 100g 단백질 3.5g");
         ck(bap && near(kcalPerUnitOf(*bap) * 100.0, 151.4), "잡곡밥 100g = 151.4kcal");
 
-        MenuPtr godeung = mvp.find("고등어구이");
-        ck(godeung && godeung->divisibility() == Divisibility::Discrete,
-           "고등어구이는 토막으로 판다 - 43g 만 팔 수는 없다");
-        ck(godeung && godeung->unit() == "토막", "단위는 토막");
-        ck(godeung && near(macrosOf(*godeung, 1.0).proteinG, 14.0), "1토막 단백질 14g");
-        ck(godeung && near(macrosOf(*godeung, 1.0).carbG, 0.0),
-           "생선에 탄수화물이 0 인 것은 모르는 것이 아니라 정말 0 이다");
-        ck(godeung && godeung->findNutrient("탄수화물") != 0,
-           "그래서 0 이라도 영양소를 빼지 않고 넣어 둔다");
+        // 낱개로 파는 것은 계란말이 하나뿐이다
+        MenuPtr egg0 = mvp.find("계란말이");
+        ck(egg0 && egg0->divisibility() == Divisibility::Discrete,
+           "계란말이는 줄로 판다 - 43g 만 팔 수는 없다");
+        ck(egg0 && egg0->unit() == "줄", "단위는 줄");
+        ck(egg0 && near(macrosOf(*egg0, 1.0).proteinG, 6.6), "1줄 단백질 6.6g");
+        ck(egg0 && egg0->findNutrient("탄수화물") != 0
+                && egg0->findNutrient("단백질") != 0
+                && egg0->findNutrient("지방") != 0,
+           "낱개 메뉴도 탄단지를 셋 다 들고 있다");
+
+        bool onlyOneDiscrete = true;
+        std::size_t discreteCount = 0;
+        for (std::size_t i = 0; i < mvp.menus().size(); ++i)
+            if (mvp.at(i)->divisibility() == Divisibility::Discrete) ++discreteCount;
+        onlyOneDiscrete = (discreteCount == 1);
+        ck(onlyOneDiscrete, "나머지 열네가지는 g 으로 담아 솔버가 양을 자유롭게 움직일 수 있다");
 
         MenuPtr jeyuk2 = mvp.find("제육볶음");
         ck(jeyuk2 && near(kcalPerUnitOf(*jeyuk2) * 100.0, 205.0), "제육볶음 100g = 205kcal");
@@ -616,7 +917,7 @@ int main() {
 
         std::vector<std::string> want;
         want.push_back("잡곡밥");
-        want.push_back("간장 닭다리살 구이");
+        want.push_back("간장 닭다리살구이");
         want.push_back("계란말이");
         std::vector<std::string> lost;
         std::vector<Pick> chosen = picksFrom(mvp, want, &lost);
@@ -646,11 +947,11 @@ int main() {
     std::printf("[어떻게 해도 안 맞는 조합은 경고하고 최선을 준다]\n");
     {
         MealPlanner mp;
-        // 삼겹살 김치볶음은 100g 에 258kcal 인데 단백질은 11g 뿐이다.
+        // 돼지고기 김치볶음은 100g 에 194kcal 인데 단백질은 13g 뿐이다.
         // 515kcal 안에서 단백질 35g 을 뽑는 것은 이 조합으로는 불가능하다.
         std::vector<std::string> want;
         want.push_back("잡곡밥");
-        want.push_back("삼겹살 김치볶음");
+        want.push_back("돼지고기 김치볶음");
         want.push_back("브로콜리 참깨무침");
         std::vector<Pick> chosen = picksFrom(mvp, want, 0);
 
@@ -661,7 +962,7 @@ int main() {
 
         // 유저가 직접 줄일 수 있어야 한다
         double before = m.calories;
-        mp.setAmount(m, 1, 100.0);              // 삼겹살을 100g 으로
+        mp.setAmount(m, 1, 100.0);              // 김치볶음을 100g 으로
         ck(near(m.items[1].amount, 100.0), "유저가 넣은 양이 그대로 들어간다");
         ck(m.calories < before, "합계가 그 자리에서 줄어든다");
     }
@@ -682,10 +983,10 @@ int main() {
 
         const WeeklyMenu* w = backBook.forDate(Date(2026,9,2));
         ck(w && w->size() == 15, "15가지가 그대로 돌아온다");
-        MenuPtr g = w ? w->find("고등어구이") : MenuPtr();
-        ck(g && g->divisibility() == Divisibility::Discrete && g->unit() == "토막",
-           "토막으로 파는 것까지 그대로");
-        ck(g && near(macrosOf(*g, 2.0).fatG, 21.0), "2토막 지방 21g");
+        MenuPtr g = w ? w->find("계란말이") : MenuPtr();
+        ck(g && g->divisibility() == Divisibility::Discrete && g->unit() == "줄",
+           "줄로 파는 것까지 그대로");
+        ck(g && near(macrosOf(*g, 2.0).fatG, 13.2), "2줄 지방 13.2g");
     }
 
     std::printf("[FoodInfo]\n");
@@ -1604,6 +1905,285 @@ int main() {
         std::string err2;
         ck(!none.load("sample/이런파일없다.csv", 0, &err2), "a missing file fails cleanly");
         ck(!err2.empty(), "with a message that names the file");
+    }
+
+    std::printf("[재고를 센다]\n");
+    {
+        Date d(2026, 8, 30);
+        WeeklyMenu week = mvpWeeklyMenu(d);
+
+        // g 으로 파는 것은 3000g, 낱개로 파는 것은 20줄
+        DailyStock s = openingStock(d, week, 3000.0, 20.0);
+        ck(s.size() == 15,                       "opening stock covers all 15 menus");
+        ck(s.untracked(week).empty(),            "nothing on the menu is left untracked");
+        ck(near(s.available("잡곡밥"), 3000.0),   "rice starts at 3000g");
+        ck(near(s.available("계란말이"), 20.0),   "the by-count menu starts at 20 pieces");
+
+        ck(s.sell("잡곡밥", 2800.0),              "selling within stock works");
+        ck(near(s.available("잡곡밥"), 200.0),    "and it comes off the top");
+        ck(!s.sell("잡곡밥", 500.0),              "selling more than is left fails");
+        ck(near(s.available("잡곡밥"), 200.0),    "and takes nothing when it fails");
+
+        // 잡아 두면 남은 양에서 빠지고, 풀면 돌아온다.
+        HoldId h = s.hold("제육볶음", 300.0, TimeOfDay(23, 59));
+        ck(h != 0,                               "a cart can hold stock");
+        ck(near(s.available("제육볶음"), 2700.0), "held stock is not available to others");
+        ck(near(s.find("제육볶음")->remaining(), 3000.0), "but it is still in the kitchen");
+        ck(s.release(h),                         "closing the cart releases it");
+        ck(near(s.available("제육볶음"), 3000.0), "and the stock comes back");
+
+        HoldId h2 = s.hold("제육볶음", 300.0, TimeOfDay(23, 59));
+        ck(s.commit(h2),                         "paying commits the hold");
+        ck(near(s.available("제육볶음"), 2700.0), "which moves held to sold");
+        ck(!s.commit(h2),                        "and the same hold cannot pay twice");
+
+        // 잡아 놓고 사라진 손님 때문에 재고가 잠기면 안 된다.
+        s.hold("두부조림", 500.0, TimeOfDay(12, 0));
+        ck(near(s.available("두부조림"), 2500.0), "an abandoned cart holds stock for a while");
+        ck(s.expire(TimeOfDay(12, 1)) == 1,      "but it expires");
+        ck(near(s.available("두부조림"), 3000.0), "and the stock is free again");
+
+        // 아침에 다시 세워도 이미 나간 것은 없던 일이 되지 않는다.
+        s.setPrepared("잡곡밥", "g", 3000.0);
+        ck(near(s.available("잡곡밥"), 200.0),    "re-prepping keeps what already went out");
+
+        // capFor 는 팔 수 있는 양으로 내림 보정한다. 잡곡밥은 10g 단위로 판다.
+        DailyStock c2(d);
+        c2.setPrepared(*week.find("잡곡밥"), 3000.0);
+        c2.sell("잡곡밥", 2875.0);
+        ck(near(c2.available("잡곡밥"), 125.0),   "125g is left");
+        ck(near(c2.capFor(*week.find("잡곡밥")), 120.0),
+                                                 "but only 120g of it is sellable (10g steps)");
+
+        // 최소 판매량(50g)에도 못 미치면 0 이다 - 오늘은 못 판다.
+        c2.sell("잡곡밥", 90.0);
+        ck(near(c2.available("잡곡밥"), 35.0),    "35g is left");
+        ck(near(c2.capFor(*week.find("잡곡밥")), 0.0),
+                                                 "which is under the 50g minimum -> cannot sell");
+
+        // 재고가 아무리 많아도 메뉴가 파는 상한을 넘겨 담을 수는 없다.
+        // 버섯채소볶음은 한 번에 200g 까지만 판다.
+        ck(near(s.capFor(*week.find("버섯채소볶음")), 200.0),
+                                                 "a menu's own ceiling caps it before stock does");
+    }
+
+    std::printf("[재고가 추천을 막는다]\n");
+    {
+        Date d(2026, 8, 30);
+        WeeklyMenu week = mvpWeeklyMenu(d);
+        DailyStock stock = openingStock(d, week, 3000.0, 20.0);
+
+        MealPlanner p;
+        Macros target(90.0, 55.0, 25.0);   // 대략 805kcal
+
+        std::vector<std::string> names;
+        names.push_back("잡곡밥");
+        names.push_back("간장 닭가슴살구이");
+        names.push_back("브로콜리 참깨무침");
+
+        // ---- 재고를 안 꽂으면 지금까지와 똑같이 돈다 ----
+        Plan before = p.solve(picksFrom(week, names), target);
+        ck(p.stockLimits() == 0,                 "no stock is plugged in by default");
+        ck(near(before.items[0].stockCap, kNoStockCap),
+                                                 "so every item's cap is 'no limit'");
+        ck(!before.items[0].stockLimited,        "and nothing is stock-limited");
+        ck(before.stockLimitedMenus().empty(),   "and no menu is flagged");
+        ck(!before.has(Issue::StockShort),       "and no shortage is reported");
+
+        // ---- 꽂아도 재고가 넉넉하면 답이 그대로다 ----
+        p.setStockLimits(&stock);
+        Plan plenty = p.solve(picksFrom(week, names, stock), target);
+        ck(plenty.itemCount() == 3,              "a full kitchen changes nothing");
+        ck(near(plenty.items[0].amount, before.items[0].amount),
+                                                 "the same amounts come out");
+        ck(!plenty.has(Issue::StockShort),       "and there is no shortage");
+
+        // ---- 재고가 모자라면 그만큼만 담긴다 ----
+        double wanted = plenty.items[0].amount;
+        ck(wanted > 130.0,                       "the planner wanted a good amount of rice");
+
+        DailyStock tight = openingStock(d, week, 3000.0, 20.0);
+        tight.sell("잡곡밥", 3000.0 - 120.0);    // 잡곡밥만 120g 남긴다
+
+        MealPlanner q;
+        q.setStockLimits(&tight);
+        Plan cut = q.solve(picksFrom(week, names, tight), target);
+
+        ck(near(cut.items[0].stockCap, 120.0),   "the rice row knows only 120g is left");
+        ck(cut.items[0].maxAmount <= 120.0 + 1e-9,
+                                                 "so it can never be dialled past 120g");
+        ck(cut.items[0].amount <= 120.0 + 1e-9,  "and the recommended amount fits in stock");
+        ck(cut.items[0].stockLimited,            "the row is marked stock-limited");
+        ck(cut.items[0].isStockCapped(),         "and it is pinned at that ceiling");
+        ck(cut.stockLimitedMenus().size() == 1,  "one menu is short");
+        ck(cut.stockLimitedMenus()[0] == "잡곡밥", "and it is the rice");
+
+        // 손으로 더 올려도 재고를 넘지 못한다.
+        double got = q.setAmount(cut, 0, 400.0);
+        ck(near(got, 120.0),                     "asking for 400g gives back 120g");
+        got = q.nudge(cut, 0, +5);
+        ck(near(got, 120.0),                     "and the + button stops there too");
+
+        // ---- 재고 때문에 목표를 못 맞추면 그 이유가 화면에 뜬다 ----
+        //
+        // 목표를 크게 잡으면 잡곡밥을 많이 담아야 닿는다.
+        // 재고가 넉넉할 때는 범위 안에 들어오고, 120g 밖에 없으면 어떻게 해도 못 닿는다 -
+        // 두 계산의 차이는 재고뿐이다.
+        //
+        // 지방을 낼 수 있는 줄이 하나는 있어야 하므로 닭가슴살 대신 제육볶음으로 짠다.
+        // (셋 다 기름기가 없으면 재고와 상관없이 지방 하한에서 먼저 걸린다)
+        std::vector<std::string> fatty;
+        fatty.push_back("잡곡밥");
+        fatty.push_back("제육볶음");
+        fatty.push_back("브로콜리 참깨무침");
+
+        Macros big(150.0, 60.0, 40.0);           // 1200kcal
+
+        Plan roomy = p.solve(picksFrom(week, fatty, stock), big);
+        ck(roomy.isWithinTolerance(),            "with a full kitchen the big target is reachable");
+        ck(roomy.items[0].amount > 120.0,        "by piling on rice");
+
+        Plan starved = q.solve(picksFrom(week, fatty, tight), big);
+        ck(!starved.isWithinTolerance(),         "with 120g of rice it is not");
+        ck(starved.has(Issue::CaloriesUnder),    "the meal comes up short on calories");
+        ck(starved.has(Issue::AmountLimited),    "because a row is pinned at its ceiling");
+        ck(starved.has(Issue::StockShort),       "and the plan says why: not enough ingredients");
+        ck(starved.warning().find("재료 부족") != std::string::npos,
+                                                 "the one-line warning says 재료 부족");
+        ck(starved.stockLimitedMenus().size() == 1 &&
+           starved.stockLimitedMenus()[0] == "잡곡밥",
+                                                 "and names the menu that ran short");
+
+        // 재고가 아니라 메뉴가 파는 범위에 막힌 것은 재료 부족이 아니다.
+        ck(roomy.stockLimitedMenus().empty(),    "a full kitchen flags nothing as short");
+    }
+
+    std::printf("[재료가 떨어지면 담을 수 없다]\n");
+    {
+        Date d(2026, 8, 30);
+        WeeklyMenu week = mvpWeeklyMenu(d);
+        DailyStock stock = openingStock(d, week, 3000.0, 20.0);
+        stock.sell("제육볶음", 3000.0);          // 오늘 제육볶음은 끝났다
+
+        MealPlanner p;
+        p.setStockLimits(&stock);
+
+        MenuPtr pork = week.find("제육볶음");
+        MenuPtr rice = week.find("잡곡밥");
+        ck(!p.canServe(*pork),                   "sold-out pork cannot be served");
+        ck(p.canServe(*rice),                    "rice still can");
+        ck(stock.state("제육볶음") == StockState::SoldOut, "and the stock agrees");
+
+        // ---- 목록을 만드는 단계에서 빠진다 ----
+        std::vector<std::string> names;
+        names.push_back("잡곡밥");
+        names.push_back("제육볶음");
+        names.push_back("두부조림");
+        names.push_back("없는메뉴");
+
+        std::vector<std::string> missing, soldOut;
+        std::vector<Pick> picks = picksFrom(week, names, stock, &missing, &soldOut);
+        ck(picks.size() == 2,                    "only what can actually be served is picked");
+        ck(missing.size() == 1 && missing[0] == "없는메뉴",
+                                                 "a name not on the menu is reported separately");
+        ck(soldOut.size() == 1 && soldOut[0] == "제육볶음",
+                                                 "and a sold-out one is reported as sold out");
+
+        // ---- 그래도 밀어 넣으면 예외 ----
+        Macros target(90.0, 55.0, 25.0);
+        std::vector<std::string> three;
+        three.push_back("잡곡밥");
+        three.push_back("제육볶음");
+        three.push_back("두부조림");
+
+        bool threw = false;
+        try { p.solve(picksFrom(week, three), target); }
+        catch (const std::invalid_argument& e) {
+            threw = std::string(e.what()).find("제육볶음") != std::string::npos;
+        }
+        ck(threw, "solving with a sold-out menu throws, and names the menu");
+
+        // ---- 메뉴 추가가 막힌다 ----
+        std::vector<std::string> ok;
+        ok.push_back("잡곡밥");
+        ok.push_back("두부조림");
+        ok.push_back("브로콜리 참깨무침");
+        Plan plan = p.solve(picksFrom(week, ok, stock), target);
+
+        ck(!p.canAddMenu(plan, *pork),           "the add button is locked for sold-out pork");
+        ck(p.addBlockReason(plan, *pork).find("재료가 부족") != std::string::npos,
+                                                 "and the reason says 재료가 부족합니다");
+        ck(p.addBlockReason(plan, *pork).find("제육볶음") != std::string::npos,
+                                                 "naming the menu the user just tapped");
+        ck(p.canAddMenu(plan, *week.find("닭갈비")), "a menu that is in stock can still be added");
+        ck(p.addBlockReason(plan, *week.find("닭갈비")).empty(), "with no reason to show");
+
+        bool blocked = false;
+        try { p.addMenu(plan, pork); }
+        catch (const std::invalid_argument&) { blocked = true; }
+        ck(blocked,                              "adding it anyway throws");
+        ck(plan.itemCount() == 3,                "and the plan is left untouched");
+
+        bool swapBlocked = false;
+        try { p.replaceItem(plan, 0, pork); }
+        catch (const std::invalid_argument&) { swapBlocked = true; }
+        ck(swapBlocked,                          "swapping something in for it is blocked too");
+
+        // 재고를 안 꽂은 planner 는 이 모든 것을 모른다 - 예전 그대로 돈다.
+        MealPlanner blind;
+        Plan free_ = blind.solve(picksFrom(week, three), target);
+        ck(free_.itemCount() == 3,               "a planner with no stock plugged in still solves");
+        ck(blind.canAddMenu(free_, *pork) || free_.contains("제육볶음"),
+                                                 "and knows nothing about what is sold out");
+    }
+
+    std::printf("[담아 둔 사이에 재고가 줄면]\n");
+    {
+        Date d(2026, 8, 30);
+        WeeklyMenu week = mvpWeeklyMenu(d);
+        DailyStock stock = openingStock(d, week, 3000.0, 20.0);
+
+        MealPlanner p;
+        p.setStockLimits(&stock);
+        Macros target(90.0, 55.0, 25.0);
+
+        std::vector<std::string> names;
+        names.push_back("잡곡밥");
+        names.push_back("간장 닭가슴살구이");
+        names.push_back("두부조림");
+        Plan plan = p.solve(picksFrom(week, names, stock), target);
+
+        StockChange none = p.refreshStock(plan);
+        ck(!none.changed(),                      "nothing changes when nothing sold");
+        ck(none.message().empty(),               "and there is nothing to say");
+
+        // 결제를 누르기 전에 다른 손님들이 쓸어 갔다.
+        double had = plan.items[0].amount;
+        stock.sell("잡곡밥", 3000.0 - 60.0);     // 잡곡밥 60g 만 남았다
+        stock.sell("두부조림", 3000.0);          // 두부조림은 다 나갔다
+
+        StockChange ch = p.refreshStock(plan);
+        ck(ch.changed(),                         "the refresh notices");
+        ck(ch.dropped.size() == 1 && ch.dropped[0] == "두부조림",
+                                                 "the sold-out menu is dropped from the plan");
+        ck(!plan.contains("두부조림"),            "and it really is gone");
+        ck(plan.itemCount() == 2,                "leaving two rows");
+        ck(ch.shrunk.size() == 1 && ch.shrunk[0] == "잡곡밥",
+                                                 "the short menu is reported as shrunk");
+        ck(near(plan.items[0].amount, 60.0),     "and its amount is cut to what is left");
+        ck(had > 60.0,                           "which is less than the user had");
+        ck(plan.items[0].stockLimited,           "the row is now stock-limited");
+        ck(ch.message().find("두부조림") != std::string::npos,
+                                                 "the message names what was dropped");
+        ck(ch.message().find("잡곡밥") != std::string::npos,
+                                                 "and what was cut");
+        ck(!plan.isValidComposition(),           "two rows is under the 3-menu floor");
+        ck(!plan.compositionWarning().empty(),   "so the confirm button stays locked with a reason");
+
+        // 값은 실제로 담긴 양으로 다시 계산돼 있어야 한다.
+        long long sum = 0;
+        for (std::size_t i = 0; i < plan.items.size(); ++i) sum += plan.items[i].price;
+        ck(plan.price == sum,                    "the total is recomputed from the rows that remain");
     }
 
     std::printf("\n%d/%d passed, %d failed\n", total - failed, total, failed);

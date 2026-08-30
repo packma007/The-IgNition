@@ -144,6 +144,28 @@ namespace domains {
 
     using MenuPtr = std::shared_ptr<Menu>;
 
+    // ---------- 담을 수 있는 양의 한계 ----------
+
+    // "이 메뉴를 지금 최대 얼마나 담을 수 있는가" 하나만 묻는 인터페이스.
+    //
+    // 재고(inventory.h)가 이걸 상속하고, 추천(recommend.h)이 이걸 들여다본다.
+    // 둘 사이에 직접 의존이 생기지 않도록 여기 둔다 - 재고는 추천을 모르고,
+    // 추천은 그 한계가 재고에서 왔는지 다른 무엇에서 왔는지 모른다.
+    // FoodSource(food.h)나 DistanceProvider(delivery.h)와 같은 방식이다.
+    class StockLimits {
+    public:
+        virtual ~StockLimits() {}
+
+        // 0 이면 지금은 그 메뉴를 담을 수 없다
+        // (매진이거나, 남은 것이 최소 판매량보다 적다).
+        // 한계가 없으면 아주 큰 값을 준다.
+        //
+        // 돌려주는 값은 그 메뉴가 실제로 팔 수 있는 양이어야 한다.
+        // Menu::normalize() 는 위로 올리므로 그대로 쓰면 안 된다 - 아래로 내림 보정한
+        // 값을 줘야 남은 것보다 많이 파는 일이 없다.
+        virtual double capFor(const Menu& menu) const = 0;
+    };
+
 }
 
 #endif
