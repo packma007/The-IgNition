@@ -7,6 +7,7 @@
 #include "storage.h"
 #include "recommend.h"
 #include "food.h"
+#include "foodcsv.h"
 #include "delivery.h"
 #include "dispatch.h"
 
@@ -994,6 +995,235 @@ int main() {
     }
 
 
+
+    // ================= 공공 영양성분 DB 표 파일 =================
+
+    std::printf("[csv 한 줄 자르기]\n");
+    {
+        std::vector<std::string> c = parseCsvLine("D001,비빔밥,100g", ',');
+        ck(c.size() == 3 && c[1] == "비빔밥", "commas split into cells");
+
+        c = parseCsvLine("D002,\"라면, 봉지\",100g", ',');
+        ck(c.size() == 3, "a comma inside quotes does not split the cell");
+        ck(c[1] == "라면, 봉지", "the quoted cell keeps its comma");
+
+        c = parseCsvLine("a,\"he said \"\"hi\"\"\",b", ',');
+        ck(c[1] == "he said \"hi\"", "doubled quotes become one quote");
+
+        c = parseCsvLine("a\tb\tc", '\t');
+        ck(c.size() == 3 && c[1] == "b", "tab separated splits too");
+
+        c = parseCsvLine("a,,c", ',');
+        ck(c.size() == 3 && c[1].empty(), "an empty cell in the middle survives");
+    }
+
+    std::printf("[csv 기준량과 숫자 읽기]\n");
+    {
+        ck(near(gramsFromAmount("100g"), 100.0), "100g");
+        ck(near(gramsFromAmount("1회분(200g)"), 200.0), "the grams inside the parentheses win");
+        ck(near(gramsFromAmount("1개(60g)"), 60.0), "1 piece = 60g");
+        ck(near(gramsFromAmount("200mL"), 200.0), "1mL is taken as 1g");
+        ck(near(gramsFromAmount("0.5kg"), 500.0), "kg becomes grams");
+        ck(near(gramsFromAmount("1컵"), 0.0), "a unit we cannot weigh gives 0, not a guess");
+        ck(near(gramsFromAmount(""), 0.0), "an empty amount gives 0");
+
+        bool ok = false;
+        ck(near(nutrientNumber("12.5", ok), 12.5) && ok, "a plain number reads");
+        nutrientNumber("", ok);
+        ck(!ok, "a blank cell is unknown, not zero");
+        nutrientNumber("-", ok);
+        ck(!ok, "a dash is unknown, not zero");
+        nutrientNumber("N/A", ok);
+        ck(!ok, "N/A is unknown, not zero");
+        ck(near(nutrientNumber("Tr", ok), 0.0) && ok, "Tr (trace) is a KNOWN zero");
+        ck(near(nutrientNumber("1,234.5", ok), 1234.5) && ok, "thousands separator");
+    }
+
+    std::printf("[이름에서 분류 접미 떼기]\n");
+    {
+        ck(foodBaseKey("김치찌개_음식점") == foodKey("김치찌개"), "underscore suffix dropped");
+        ck(foodBaseKey("라면, 봉지") == foodKey("라면"), "comma suffix dropped");
+        ck(foodBaseKey("우유(저지방)") == foodKey("우유"), "parenthesised suffix dropped");
+        ck(foodBaseKey("비빔밥") == foodKey("비빔밥"), "a plain name is its own base");
+    }
+
+    std::printf("[식약처 표 읽기]\n");
+    FoodCsvSource mfds;
+    {
+        std::string csv =
+            "\xEF\xBB\xBF" "식품영양성분DB 20240301 배포본 (샘플 11줄)\r\n"
+            "식품코드,식품명,데이터구분명,영양성분함량기준량,에너지(kcal),단백질(g),지방(g),탄수화물(g),식품중량\r\n"
+            "D001,김치찌개_음식점,음식점,100g,45,4.5,2.8,3.1,400g\r\n"
+            "D002,비빔밥,음식점,100g,131,5.2,3.4,20.1,500g\r\n"
+            "D003,닭가슴살_구운것,가공식품,100g,165,31.0,3.6,0.0,100g\r\n"
+            "D004,된장찌개,음식점,100g,52,4.1,2.2,4.0,400g\r\n"
+            "D005,흰밥,가정식,100g,143,2.6,0.3,31.7,210g\r\n"
+            "D006,오렌지주스,가공식품,200mL,88,1.4,0.2,20.6,200mL\r\n"
+            "D007,제육덮밥,음식점,1회분(450g),,25.0,28.0,110.0,450g\r\n"
+            "D008,\"라면, 봉지\",가공식품,100g,,9.0,17.0,65.0,120g\r\n"
+            "D009,미역국,음식점,100g,,2.0,Tr,1.5,350g\r\n"
+            "D010,물,가공식품,100g,,-,-,-,\r\n"
+            "D011,,가공식품,100g,,1.0,1.0,1.0,100g\r\n";
+        std::istringstream in(csv);
+        CsvReport r = mfds.read(in);
+
+        ck(r.delimiter == ',', "comma delimiter detected");
+        ck(mfds.size() == 9, "9 foods loaded");
+        ck(r.dataRows == 11, "11 data rows seen");
+        ck(r.skipped == 2, "2 rows dropped: no macros at all, and no name");
+        ck(r.warnings.size() >= 2, "and every dropped row is reported, not swallowed");
+        ck(!r.encodingSuspect, "a utf-8 file passes the encoding check");
+        ck(r.mlRows == 1, "one row was measured in mL");
+        std::printf("        %s\n", r.summary().c_str());
+
+        FoodInfo f;
+        ck(mfds.lookup("비빔밥", f), "exact name found");
+        ck(f.source == MacroSource::Official, "marked as public DB, not an estimate");
+        ck(near(f.per100g.carbG, 20.1) && near(f.per100g.proteinG, 5.2),
+           "per-100g values come straight from the table");
+        ck(near(f.servingGrams, 500.0), "식품중량 500g became the serving size");
+        ck(near(f.confidence, 1.0), "an exact name is fully confident");
+        ck(f.origin.find("식약처") != std::string::npos, "origin says where it came from");
+
+        FoodInfo k;
+        ck(mfds.lookup("김치찌개", k), "김치찌개 found through 김치찌개_음식점");
+        ck(k.name == "김치찌개_음식점", "and it reports the row it actually matched");
+        ck(near(k.per100g.proteinG, 4.5), "with that row's values");
+        ck(k.confidence < 1.0, "a suffix match is NOT presented as certain");
+
+        FoodInfo sp;
+        ck(mfds.lookup("김치 찌개", sp) && sp.name == k.name, "a space in the typed name is ignored");
+
+        // 기준량이 100g 이 아닌 줄. 여기서 안 맞추면 한 그릇을 두 그릇으로 기록한다.
+        FoodInfo je;
+        ck(mfds.lookup("제육덮밥", je), "row measured per serving, not per 100g");
+        ck(near(je.per100g.proteinG, 25.0 * 100.0 / 450.0), "converted down to per-100g");
+        ck(near(je.forServings(1.0).proteinG, 25.0), "one serving gives the table value back");
+        ck(near(je.forServings(1.0).calories(), 110.0 * 4 + 25.0 * 4 + 28.0 * 9),
+           "and the calories of one serving survive the round trip");
+
+        FoodInfo oj;
+        ck(mfds.lookup("오렌지주스", oj), "a drink measured in 200mL");
+        ck(near(oj.per100g.carbG, 10.3), "200mL basis halved to 100g");
+
+        FoodInfo ra;
+        ck(mfds.lookup("라면", ra) && ra.name == "라면, 봉지", "quoted name is matched by its base");
+
+        FoodInfo mi;
+        ck(mfds.lookup("미역국", mi) && near(mi.per100g.fatG, 0.0), "a Tr row is kept as zero fat");
+
+        FoodInfo miss;
+        ck(!mfds.lookup("김치", miss), "김치 does NOT silently become 김치찌개");
+        ck(!mfds.lookup("밥", miss), "밥 does NOT silently become 비빔밥");
+        ck(!mfds.lookup("탕수육", miss), "a food that is not in the table is reported missing");
+    }
+
+    std::printf("[표에서 후보 늘어놓기]\n");
+    {
+        std::vector<FoodInfo> hits = mfds.search("찌개");
+        ck(hits.size() == 2, "두 찌개 both show up as candidates");
+        ck(hits[0].name == "된장찌개", "the shorter, more general name comes first");
+
+        std::vector<FoodInfo> rice = mfds.search("밥");
+        ck(rice.size() == 3, "밥 matches three foods - here we DO show them all");
+        ck(rice[0].name == "흰밥", "shortest first");
+        ck(mfds.search("밥", 1).size() == 1, "limit is honoured");
+        ck(mfds.search("없는것").empty(), "no candidates for a food we do not have");
+    }
+
+    std::printf("[FoodResolver + 식약처 표]\n");
+    {
+        LocalFoodDatabase cache;
+        FakeAI ai;
+        FoodResolver rs;
+        rs.setCache(&cache);
+        rs.addSource(&cache);   // 1. 이미 아는 것
+        rs.addSource(&mfds);    // 2. 공공 DB
+        rs.addSource(&ai);      // 3. 마지막 수단
+
+        FoodInfo got;
+        ck(rs.resolve("비빔밥", got), "resolved through the public DB");
+        ck(got.source == MacroSource::Official, "and it is Official, not an estimate");
+        ck(ai.calls == 0, "the AI was never called for a food the public DB knows");
+        ck(cache.size() == 1, "the answer was cached");
+
+        FoodInfo again;
+        ck(rs.resolve("비빔밥", again) && ai.calls == 0, "the second time comes from the cache");
+
+        FoodInfo weird;
+        ck(rs.resolve("사장님표 정체불명 볶음", weird), "an unknown food still gets an answer");
+        ck(weird.source == MacroSource::Estimated, "but it is flagged as an estimate");
+        ck(ai.calls == 1, "and only then was the AI called");
+
+        Meal m = got.toMeal(MealTime::Lunch, TimeOfDay(12, 30), 500.0);
+        ck(m.source() == MacroSource::Official, "the meal carries the public DB as its source");
+        ck(!m.isConfirmed(), "the amount is still our guess, so it is not confirmed");
+        ck(near(m.total().carbG, 100.5), "500g of bibimbap = 100.5g carbs");
+
+        LocalFoodDatabase small;
+        std::vector<std::string> favourites;
+        favourites.push_back("비빔밥");
+        favourites.push_back("된장찌개");
+        favourites.push_back("없는음식");
+        ck(mfds.exportTo(small, favourites) == 2, "two of three favourites were found");
+        ck(small.size() == 2, "and they moved into a small local table we can ship");
+    }
+
+    std::printf("[칸 순서가 달라도, 탭으로 나눠도]\n");
+    {
+        std::string tsv =
+            "단백질(g)\t식품명\t지방\t탄수화물\n"
+            "31.0\t닭가슴살\t3.6\t0.0\n";
+        std::istringstream in(tsv);
+        FoodCsvSource f;
+        CsvReport r = f.read(in);
+        ck(r.delimiter == '\t', "tab delimiter detected");
+        ck(f.size() == 1, "column order does not matter - we read by header name");
+        FoodInfo c;
+        ck(f.lookup("닭가슴살", c) && near(c.per100g.proteinG, 31.0), "found with the right values");
+        ck(!c.hasServing(), "no 식품중량 column means we admit we do not know the serving");
+        ck(near(c.per100g.calories(), 31.0 * 4 + 3.6 * 9), "no 기준량 column falls back to 100g");
+    }
+
+    std::printf("[표가 아닌 파일, 잘못된 인코딩]\n");
+    {
+        std::string junk = "hello\nworld\n1,2,3\n";
+        std::istringstream in(junk);
+        FoodCsvSource f;
+        CsvReport r = f.read(in);
+        ck(r.loaded == 0 && f.empty(), "nothing loads from a file that is not a food table");
+        ck(!r.warnings.empty(), "and it says it could not find the header");
+        FoodInfo x;
+        ck(!f.lookup("비빔밥", x), "an empty source answers nothing instead of crashing");
+
+        // 엑셀이 기본으로 뱉는 CP949 파일. 조용히 깨진 이름을 담으면 영영 못 찾는다.
+        std::string cp949 =
+            "식품명,단백질(g),지방(g),탄수화물(g),영양성분함량기준량\n";
+        cp949 += "\xB1\xE8\xC4\xA1\xC2\xCC\xB0\xB3,4.5,2.8,3.1,100g\n";
+        std::istringstream in2(cp949);
+        FoodCsvSource f2;
+        CsvReport r2 = f2.read(in2);
+        ck(r2.encodingSuspect, "a cp949 file is caught, not silently mangled");
+        ck(!r2.warnings.empty(), "and the warning tells the user how to re-save it");
+    }
+
+    std::printf("[표 파일을 디스크에서]\n");
+    {
+        FoodCsvSource f;
+        CsvReport r;
+        std::string err;
+        bool loaded = f.load("sample/food_nutrition_sample.csv", &r, &err);
+        ck(loaded, "the sample csv loads from disk");
+        if (!loaded) std::printf("        %s\n", err.c_str());
+        ck(f.size() == 9, "the same 9 foods as the in-memory copy");
+        FoodInfo b;
+        ck(f.lookup("비빔밥", b) && near(b.per100g.carbG, 20.1), "and they resolve the same way");
+
+        FoodCsvSource none;
+        std::string err2;
+        ck(!none.load("sample/이런파일없다.csv", 0, &err2), "a missing file fails cleanly");
+        ck(!err2.empty(), "with a message that names the file");
+    }
 
     std::printf("\n%d/%d passed, %d failed\n", total - failed, total, failed);
     return failed ? 1 : 0;

@@ -127,6 +127,12 @@ namespace domains {
 
     }
 
+    // ---------- 이름 맞추기 ----------
+
+    // 위 key() 를 밖으로 내보낸다. 공공 DB 어댑터(foodcsv.h)가 같은 규칙으로
+    // 다듬어야 로컬에서 찾히던 이름이 공공 DB 에서도 찾힌다.
+    std::string foodKey(const std::string& name) { return key(name); }
+
     // ---------- FoodInfo ----------
 
     FoodInfo::FoodInfo(std::string name, Macros per100g, MacroSource source)
