@@ -1,5 +1,4 @@
 #include "domains.h"
-#include <iostream>
 #include <string>
 #include <cmath>
 #include <stdexcept>
@@ -14,15 +13,6 @@ namespace domains {
             if (step <= 0.0) return true;
             double q = amount / step;
             return std::fabs(q - std::round(q)) < kEps;
-        }
-
-        std::string trimZeros(double v) {
-            std::string s = std::to_string(v);
-            std::size_t dot = s.find('.');
-            if (dot == std::string::npos) return s;
-            std::size_t last = s.find_last_not_of('0');
-            if (last == dot) last = dot - 1;
-            return s.substr(0, last + 1);
         }
     }
 
@@ -41,11 +31,6 @@ namespace domains {
         return amountFor(menuAmount) * kcalPerGram();
     }
 
-    std::string Nutrient::describe(double menuAmount) const {
-        return name() + " " + trimZeros(amountFor(menuAmount)) + unit()
-             + " (" + trimZeros(caloriesFor(menuAmount)) + "kcal)";
-    }
-
     // ---------- Menu ----------
 
     Menu::Menu(std::string name, std::string unit, long long unitPrice)
@@ -56,12 +41,6 @@ namespace domains {
     long long Menu::priceFor(double amount) const {
         double a = normalize(amount);
         return static_cast<long long>(std::llround(a * static_cast<double>(unitPrice_)));
-    }
-
-    std::string Menu::describe(double amount) const {
-        double a = normalize(amount);
-        return name_ + " " + trimZeros(a) + unit_
-             + " - " + std::to_string(priceFor(a)) + "원";
     }
 
     void Menu::addNutrient(NutrientPtr nutrient) {
@@ -87,18 +66,6 @@ namespace domains {
         double total = 0.0;
         for (const auto& n : nutrients_) total += n->caloriesFor(a);
         return total;
-    }
-
-    std::string Menu::describeNutrition(double amount) const {
-        double a = normalize(amount);
-        if (nutrients_.empty()) return name_ + " - 영양 정보 없음";
-
-        std::string s = name_ + " " + trimZeros(a) + unit_ + " : ";
-        for (std::size_t i = 0; i < nutrients_.size(); ++i) {
-            if (i > 0) s += ", ";
-            s += nutrients_[i]->describe(a);
-        }
-        return s + " / 합계 " + trimZeros(caloriesFor(a)) + "kcal";
     }
 
     // ---------- DiscreteMenu ----------

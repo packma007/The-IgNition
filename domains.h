@@ -24,7 +24,6 @@ namespace domains {
         double amountPerUnit() const { return amountPerUnit_; }   // 메뉴 1단위당 함량
         double amountFor(double menuAmount) const;                // 주문량 기준 함량
         double caloriesFor(double menuAmount) const;              // 주문량 기준 열량
-        std::string describe(double menuAmount) const;            // "탄수화물 24g (96kcal)"
 
     protected:
         double amountPerUnit_;
@@ -84,14 +83,12 @@ namespace domains {
         const std::vector<NutrientPtr>& nutrients() const { return nutrients_; }
         const Nutrient* findNutrient(const std::string& name) const;
         double caloriesFor(double amount) const;               // 보정된 양 기준 총 열량
-        std::string describeNutrition(double amount) const;
 
         // 파생 클래스가 채우는 부분
         virtual Divisibility divisibility() const = 0;
         virtual bool isValidAmount(double amount) const = 0;   // 판매 가능한 양인가
         virtual double normalize(double amount) const = 0;     // 판매 가능한 양으로 보정
         virtual long long priceFor(double amount) const;       // 보정된 양 기준 가격
-        virtual std::string describe(double amount) const;     // "아메리카노 2잔 - 6000원"
 
     protected:
         std::string name_;
