@@ -6,6 +6,7 @@
 #include "calendar.h"
 #include "storage.h"
 #include "recommend.h"
+#include "menuseed.h"
 #include "food.h"
 #include "foodcsv.h"
 #include "delivery.h"
@@ -57,6 +58,7 @@ static void ck(bool ok, const char* what) {
     ++total;
     if (!ok) { ++failed; std::printf("  FAIL  %s\n", what); }
     else       std::printf("  ok    %s\n", what);
+    std::fflush(stdout);
 }
 static bool near(double a, double b) { return std::fabs(a - b) < 1e-6; }
 
@@ -220,91 +222,471 @@ int main() {
     soup->addNutrient<Protein>(4.0);
     soup->addNutrient<Fat>(3.0);
 
-    std::printf("[DinnerPlanner]\n");
-    DinnerPlanner planner;
-    planner.addMenu(salad); planner.addMenu(jeyuk);
-    planner.addMenu(rice);  planner.addMenu(soup);
+    std::printf("[WeeklyMenu: 일요일부터 토요일까지 고정]\n");
+    // 2026-08-30 은 일요일이다
+    ck(WeeklyMenu::weekStartOf(Date(2026,9,2)) == Date(2026,8,30),
+       "수요일을 넣으면 그 주의 일요일이 나온다");
+    ck(WeeklyMenu::weekStartOf(Date(2026,8,30)) == Date(2026,8,30),
+       "일요일은 그대로 주 시작일");
+    ck(WeeklyMenu::weekStartOf(Date(2026,9,5)) == Date(2026,8,30),
+       "토요일까지가 같은 주");
+    ck(WeeklyMenu::weekStartOf(Date(2026,9,6)) == Date(2026,9,6),
+       "다음 일요일부터는 다음 주");
+    ck(!WeeklyMenu::isSameWeek(Date(2026,9,5), Date(2026,9,6)),
+       "토요일과 그다음 일요일은 다른 주");
 
-    // budget: 520 kcal, 45 g protein
-    Macros budget(40, 45, 12);
-    std::vector<Suggestion> sug = planner.suggest(budget, 5);
-    ck(!sug.empty(), "suggestions produced");
-    ck(sug.size() <= 5, "respects maxResults");
+    WeeklyMenu week(Date(2026,9,2));          // 일 8/30 ~ 토 9/5
+    ck(week.weekStart() == Date(2026,8,30), "주 시작 = 일요일");
+    ck(week.weekEnd()   == Date(2026,9,5),  "주 끝 = 토요일");
+    ck(week.covers(Date(2026,9,5)),  "토요일도 이 주에 든다");
+    ck(!week.covers(Date(2026,9,6)), "다음 일요일은 이 주가 아니다");
 
-    bool sorted = true;
-    for (std::size_t i = 1; i < sug.size(); ++i)
-        if (sug[i].score < sug[i-1].score - 1e-9) sorted = false;
-    ck(sorted, "results sorted best-first");
+    week.add(salad); week.add(jeyuk); week.add(rice); week.add(soup);
+    ck(week.size() == 4, "메뉴 4가지");
+    week.add(salad);                          // 같은 이름을 다시
+    ck(week.size() == 4, "같은 이름은 덮어쓰고 가짓수가 늘지 않는다");
+    ck(week.find("rice") == rice, "이름으로 찾기");
+    ck(!week.find("없는메뉴"), "없는 이름은 널");
+    ck(week.slotsLeft() == WeeklyMenu::capacity() - 4, "남은 자리");
 
-    ck(sug[0].isWithinTolerance(), "best result is inside tolerance");
-    ck(sug[0].items.size() >= 1 && sug[0].itemCount() <= 3, "at most maxItems menus");
-    ck(near(sug[0].calories, sug[0].macros.calories()), "reported calories match macros");
-    ck(sug[0].price > 0, "price carried through");
-
-    // every suggestion must be internally consistent
-    bool consistent = true;
-    for (std::size_t i = 0; i < sug.size(); ++i) {
-        Macros sum;
-        long long p = 0;
-        for (std::size_t k = 0; k < sug[i].items.size(); ++k) {
-            sum += sug[i].items[k].macros;
-            p   += sug[i].items[k].price;
-        }
-        if (!near(sum.calories(), sug[i].calories) || p != sug[i].price) consistent = false;
-        if (!near(sug[i].calorieDelta, sug[i].calories - sug[i].targetCalories)) consistent = false;
+    for (int i = 0; week.size() < WeeklyMenu::capacity(); ++i) {
+        std::ostringstream nm;
+        nm << "filler-" << i;
+        MenuPtr f(new DiscreteMenu(nm.str(), "gr", 1000, 1, 1));
+        f->addNutrient<Carbohydrate>(10.0);
+        f->addNutrient<Protein>(2.0);
+        week.add(f);
     }
-    ck(consistent, "items sum to the reported totals");
+    ck(week.isFull() && week.size() == 15, "한 주는 15가지로 찬다");
+    {
+        bool threw = false;
+        MenuPtr extra(new DiscreteMenu("sixteenth", "gr", 1000, 1, 1));
+        try { week.add(extra); } catch (const std::exception&) { threw = true; }
+        ck(threw, "16번째 메뉴는 조용히 버려지지 않고 예외가 된다");
+    }
+    ck(week.nextWeek().weekStart() == Date(2026,9,6), "다음 주 메뉴판은 다음 일요일");
+    ck(week.nextWeek().empty(), "다음 주는 빈 메뉴판으로 시작한다");
 
-    std::printf("[over-budget handling]\n");
-    // a tiny budget: nothing fits, so every option must be flagged, not hidden
-    std::vector<Suggestion> tight = planner.suggest(Macros(2, 2, 1), 5);
-    ck(!tight.empty(), "over-budget options are still returned, not hidden");
-    bool allFlagged = true;
-    for (std::size_t i = 0; i < tight.size(); ++i)
-        if (!tight[i].has(Issue::CaloriesOver)) allFlagged = false;
-    ck(allFlagged, "every over-budget option carries CaloriesOver");
+    std::printf("[MenuBook: 매주 갈아끼운다]\n");
+    MenuBook book;
+    book.set(week);
+    ck(book.size() == 1, "한 주가 들어갔다");
+    ck(book.forDate(Date(2026,9,2)) != 0, "주중 아무 날로도 찾힌다");
+    ck(book.forDate(Date(2026,9,5)) != 0, "토요일에도 같은 메뉴판");
+    ck(book.forDate(Date(2026,9,6)) == 0, "다음 주는 아직 없다");
+    {
+        WeeklyMenu next = week.nextWeek();
+        next.add(jeyuk);
+        book.set(next);
+        ck(book.size() == 2, "주마다 메뉴판이 쌓인다");
+        ck(book.forDate(Date(2026,9,6))->size() == 1, "다음 주는 1가지뿐");
+        ck(book.forDate(Date(2026,9,2))->size() == 15,
+           "지난 주 메뉴판은 그대로 남는다 - 그래야 지난 기록을 해석할 수 있다");
+    }
 
-    // budget already spent -> target is zero/negative
-    std::vector<Suggestion> spent = planner.suggest(Macros(0, 0, 0), 3);
-    ck(!spent.empty(), "zero budget still yields options");
-    ck(spent[0].has(Issue::CaloriesOver), "zero budget flags over");
-    ck(spent[0].calories <= tight[0].calories + 1e-6 || true, "zero budget prefers smallest");
+    std::printf("[주간 메뉴판 저장/복원]\n");
+    {
+        Calendar cal2(NutritionGoal(Macros(250,150,60)));
+        cal2.day(Date(2026,9,2)).addMeal(Meal("rice", MealTime::Lunch, Macros(70,6,0), 1.0));
 
-    std::printf("[asymmetric tolerance]\n");
-    // protein overshoot must NOT be penalised; protein shortfall must be
-    DinnerPlanner p2;
-    MenuPtr lean(new DiscreteMenu("lean", "gr", 100, 1, 1));
-    lean->addNutrient<Carbohydrate>(10.0);
-    lean->addNutrient<Protein>(60.0);   // way over a 20 g target
-    lean->addNutrient<Fat>(10.0);
-    MenuPtr carby(new DiscreteMenu("carby", "gr", 100, 1, 1));
-    carby->addNutrient<Carbohydrate>(72.0);
-    carby->addNutrient<Protein>(2.0);
-    carby->addNutrient<Fat>(10.0);
-    p2.addMenu(lean); p2.addMenu(carby);
-    p2.setMaxItems(1);
-    p2.setMaxServingsPerMenu(1);   // 메뉴당 후보 1개씩만 -> pr[0]=lean, pr[1]=carby
-    std::vector<Suggestion> pr = p2.suggest(Macros(20, 20, 10), 2);
-    ck(pr.size() == 2, "two single-menu options");
-    ck(pr[0].items[0].menu->name() == "lean",
-       "protein-rich option wins though it overshoots protein 3x");
-    ck(pr[1].has(Issue::ProteinShort), "protein-poor option flagged short");
+        std::ostringstream out;
+        storage::write(cal2, book, out);
+        ck(out.str().find("WEEKMENU\t2026\t8\t30") != std::string::npos,
+           "WEEKMENU 줄이 주 시작일로 적힌다");
 
-    std::printf("[log a chosen suggestion]\n");
+        Calendar back(NutritionGoal(Macros(1,1,1)));
+        MenuBook backBook;
+        std::istringstream in(out.str());
+        storage::read(back, backBook, in);
+
+        ck(backBook.size() == book.size(), "주차 수가 그대로");
+        const WeeklyMenu* w = backBook.forDate(Date(2026,9,2));
+        ck(w && w->size() == 15, "15가지가 그대로 돌아온다");
+        ck(w && w->contains("rice"), "이름이 그대로");
+
+        MenuPtr r = w ? w->find("rice") : MenuPtr();
+        ck(r && r->divisibility() == Divisibility::Continuous, "무게 메뉴는 무게 메뉴로");
+        ck(r && near(macrosOf(*r, 100.0).carbG, 35.0), "영양소가 그대로");
+        ck(r && !r->isValidAmount(45.0) && r->isValidAmount(50.0),
+           "최소 판매량과 계량 단위까지 복원된다");
+
+        MenuPtr j = w ? w->find("jeyuk") : MenuPtr();
+        ck(j && j->divisibility() == Divisibility::Discrete, "낱개 메뉴는 낱개 메뉴로");
+        ck(j && j->unitPrice() == 9000, "가격이 그대로");
+
+        ck(back.mealCount() == 1, "같은 파일에서 그날의 기록도 같이 돌아온다");
+
+        Calendar plain(NutritionGoal(Macros(1,1,1)));
+        std::istringstream in2(out.str());
+        storage::read(plain, in2);
+        ck(plain.mealCount() == 1, "메뉴판을 안 받는 read() 도 v4 파일을 읽는다");
+    }
+
+    std::printf("[MealPlanner: 고른 메뉴의 양을 맞춘다]\n");
+    // 유저가 고르고, 우리는 양만 푼다.
+    MenuPtr chicken(new ContinuousMenu("chicken", "g", 25, 50.0, 300.0, 10.0));
+    chicken->addNutrient<Protein>(0.31);
+    chicken->addNutrient<Fat>(0.04);
+
+    MealPlanner planner;
+
+    ck(!MealPlanner::isValidPickCount(2), "2가지는 너무 적다");
+    ck(MealPlanner::isValidPickCount(3) && MealPlanner::isValidPickCount(9),
+       "3~9 가지가 유효 범위");
+    ck(!MealPlanner::isValidPickCount(10), "10가지는 너무 많다");
+    {
+        std::vector<Pick> few;
+        few.push_back(Pick(salad));
+        few.push_back(Pick(rice));
+        bool threw = false;
+        try { planner.solve(few, Macros(40,45,12)); }
+        catch (const std::exception&) { threw = true; }
+        ck(threw, "가짓수가 모자라면 조용히 통과시키지 않고 예외");
+    }
+
+    // 남은 영양분 700 kcal / 단백질 50 g
+    Macros budget(80, 50, 20);
+    ck(near(budget.calories(), 700.0), "예산은 700kcal");
+
+    std::vector<Pick> picks;
+    picks.push_back(Pick(rice));
+    picks.push_back(Pick(chicken));
+    picks.push_back(Pick(salad));
+
+    Plan plan = planner.solve(picks, budget);
+    ck(plan.itemCount() == 3, "고른 가짓수는 그대로 나온다 - 우리가 빼거나 더하지 않는다");
+    ck(near(plan.targetCalories, 700.0), "목표는 남은 열량");
+
+    bool sellable = true, consistent = true;
+    Macros sum;
+    long long price = 0;
+    for (std::size_t i = 0; i < plan.items.size(); ++i) {
+        if (!plan.items[i].menu->isValidAmount(plan.items[i].amount)) sellable = false;
+        if (!near(plan.items[i].macros.carbG,
+                  macrosOf(*plan.items[i].menu, plan.items[i].amount).carbG))
+            consistent = false;
+        sum   += plan.items[i].macros;
+        price += plan.items[i].price;
+    }
+    ck(sellable, "정해진 양은 모두 실제로 팔 수 있는 양이다");
+    ck(consistent, "항목의 탄단지는 그 양에서 나온 값이다");
+    ck(near(sum.calories(), plan.calories) && price == plan.price,
+       "항목을 더하면 합계가 된다");
+    ck(near(plan.calorieDelta, plan.calories - plan.targetCalories), "delta 가 맞다");
+
+    ck(plan.isWithinTolerance(), "밥/닭/샐러드 셋이면 700kcal 목표에 들어간다");
+    ck(plan.warning().empty(), "범위 안이면 경고 문구가 없다");
+    ck(!plan.isBestEffort(), "범위 안이면 최선책이 아니라 정답이다");
+    ck(std::fabs(plan.calorieDelta) <= 70.0 + 1e-6, "열량 오차 10% 안");
+    ck(plan.macros.proteinG >= 45.0 - 1e-6, "단백질은 목표의 90% 이상");
+    ck(plan.macros.fatG >= 700.0 * 0.20 / 9.0 - 1e-6, "지방은 그 끼니 열량의 20% 이상");
+
+    std::printf("[양만 바꿔서 목표를 따라간다]\n");
+    {
+        // 같은 메뉴를 골라도 목표가 작아지면 양이 줄어야 한다
+        Plan small = planner.solve(picks, Macros(40, 25, 10));
+        double before = 0.0, after = 0.0;
+        for (std::size_t i = 0; i < plan.items.size(); ++i)  before += plan.items[i].amount;
+        for (std::size_t i = 0; i < small.items.size(); ++i) after  += small.items[i].amount;
+        ck(small.calories < plan.calories, "목표가 줄면 담는 열량도 준다");
+        ck(after < before, "같은 메뉴인데 양이 줄었다");
+        ck(small.price <= plan.price, "적게 담으면 값도 싸다");
+    }
+
+    std::printf("[유저가 양을 고정한 항목]\n");
+    {
+        std::vector<Pick> locked;
+        locked.push_back(Pick(rice));
+        locked.push_back(Pick(chicken));
+        locked.push_back(Pick::fixed(salad, 1.0));   // 샐러드는 무조건 1개
+        Plan lp = planner.solve(locked, budget);
+        ck(near(lp.items[2].amount, 1.0), "고정한 양은 손대지 않는다");
+        ck(lp.items[2].locked, "고정 표시가 남는다");
+        ck(lp.isWithinTolerance(), "나머지 둘을 움직여 목표에 맞춘다");
+    }
+
+    std::printf("[유저가 건 상한]\n");
+    {
+        std::vector<Pick> capped;
+        capped.push_back(Pick(rice, 0.0, 100.0));    // 밥은 100g 까지만
+        capped.push_back(Pick(chicken));
+        capped.push_back(Pick(salad));
+        Plan cp = planner.solve(capped, budget);
+        ck(cp.items[0].amount <= 100.0 + 1e-9, "유저가 건 상한을 넘지 않는다");
+    }
+
+    std::printf("[맞출 수 없을 때는 숨기지 않고 알린다]\n");
+    {
+        // 아무리 담아도 700kcal 에 못 미치는 메뉴들
+        MenuPtr tiny1(new ContinuousMenu("tiny-1", "g", 5, 10.0, 20.0, 10.0));
+        tiny1->addNutrient<Carbohydrate>(0.1);
+        MenuPtr tiny2(new ContinuousMenu("tiny-2", "g", 5, 10.0, 20.0, 10.0));
+        tiny2->addNutrient<Protein>(0.1);
+        MenuPtr tiny3(new ContinuousMenu("tiny-3", "g", 5, 10.0, 20.0, 10.0));
+        tiny3->addNutrient<Fat>(0.1);
+
+        std::vector<Pick> tp;
+        tp.push_back(Pick(tiny1)); tp.push_back(Pick(tiny2)); tp.push_back(Pick(tiny3));
+        Plan t = planner.solve(tp, budget);
+        ck(!t.isWithinTolerance(), "못 맞춘 답을 맞춘 척하지 않는다");
+        ck(t.has(Issue::CaloriesUnder), "열량 부족이 표시된다");
+        ck(t.has(Issue::AmountLimited), "양의 한계에 걸렸음을 알린다");
+        ck(!t.limitedMenus().empty(), "어떤 메뉴가 한계인지 이름으로 알려 준다");
+        ck(t.itemCount() == 3, "그래도 답은 돌려준다 - 막지 않는다");
+        ck(t.isBestEffort(), "오차범위를 못 맞춘 답임을 스스로 밝힌다");
+        ck(!t.warning().empty(), "화면에 그대로 띄울 경고 문구가 나온다");
+
+        // 그나마 가장 덜 어긋난 양이어야 한다 - 셋 다 끝까지 담은 것이 최선이다
+        bool allMax = true;
+        for (std::size_t i = 0; i < t.items.size(); ++i)
+            if (!t.items[i].atMax) allMax = false;
+        ck(allMax, "맞출 수 없으면 가장 덜 어긋나는 양으로 담아 준다");
+
+        // 그래도 유저는 여전히 양을 바꿀 수 있다
+        planner.nudge(t, 0, -1);
+        ck(t.items[0].amount < t.items[0].maxAmount, "경고가 떠도 양은 유저가 바꾼다");
+    }
+
+    std::printf("[탄수화물만 골랐다면 단백질은 알려만 준다]\n");
+    {
+        MenuPtr c1(new ContinuousMenu("carb-1", "g", 3, 0.0, 500.0, 10.0));
+        c1->addNutrient<Carbohydrate>(0.8);
+        MenuPtr c2(new ContinuousMenu("carb-2", "g", 3, 0.0, 500.0, 10.0));
+        c2->addNutrient<Carbohydrate>(0.6);
+        MenuPtr c3(new ContinuousMenu("carb-3", "g", 3, 0.0, 500.0, 10.0));
+        c3->addNutrient<Carbohydrate>(0.4);
+
+        std::vector<Pick> cp;
+        cp.push_back(Pick(c1)); cp.push_back(Pick(c2)); cp.push_back(Pick(c3));
+        Plan c = planner.solve(cp, budget);
+        ck(c.has(Issue::ProteinShort), "단백질 부족이 표시된다");
+        ck(c.has(Issue::FatShort), "지방 부족이 표시된다");
+        ck(std::fabs(c.calorieDelta) <= 70.0 + 1e-6,
+           "맞출 수 있는 열량은 그래도 맞춘다 - 넘치는 탄수화물에는 벌점이 없다");
+    }
+
+    std::printf("[예산이 이미 없을 때]\n");
+    {
+        Plan zero = planner.solve(picks, Macros(0, 0, 0));
+        ck(zero.has(Issue::CaloriesOver), "예산이 없으면 뭘 담아도 초과다");
+        bool allMin = true;
+        for (std::size_t i = 0; i < zero.items.size(); ++i)
+            if (!zero.items[i].atMin) allMin = false;
+        ck(allMin, "그래도 가장 적은 양으로 담아 준다");
+    }
+
+    std::printf("[추천은 추천일 뿐 - 유저가 양을 바꾼다]\n");
+    {
+        Plan p = planner.solve(picks, budget);   // 0=rice(무게) 1=chicken(무게) 2=salad(낱개)
+        ck(!p.items[0].countsByUnit(), "밥은 양(g)으로 조절한다");
+        ck(p.items[2].countsByUnit(),  "샐러드는 개수로 조절한다");
+        ck(near(p.items[0].step, 10.0), "밥의 한 칸은 계량 단위 10g");
+        ck(near(p.items[2].nudgeStep, 1.0), "샐러드의 한 칸은 1개");
+        ck(p.items[0].unit() == "g", "화면에 쓸 단위가 항목에 실려 있다");
+        ck(p.items[0].minAmount >= 50.0 && p.items[0].maxAmount <= 400.0,
+           "조절할 수 있는 범위도 실려 있다");
+
+        double asked = p.items[0].amount + 35.0;
+        double got = planner.setAmount(p, 0, asked);
+        ck(near(got, p.items[0].amount), "정해진 양을 그대로 돌려준다");
+        ck(p.items[0].menu->isValidAmount(got),
+           "손으로 넣은 값도 팔 수 있는 양으로 보정된다");
+        ck(std::fabs(got - asked) <= 5.0 + 1e-9, "가장 가까운 칸으로 붙는다");
+
+        Macros sum2;
+        for (std::size_t i = 0; i < p.items.size(); ++i) sum2 += p.items[i].macros;
+        ck(near(sum2.calories(), p.calories), "양을 바꾸면 합계가 그 자리에서 다시 계산된다");
+        ck(near(p.calorieDelta, p.calories - p.targetCalories), "경고 기준도 같이 갱신된다");
+
+        planner.setAmount(p, 0, 99999.0);
+        ck(near(p.items[0].amount, p.items[0].maxAmount) && p.items[0].atMax,
+           "상한을 넘겨 넣으면 상한에서 멈춘다");
+        planner.setAmount(p, 0, -5.0);
+        ck(near(p.items[0].amount, p.items[0].minAmount) && p.items[0].atMin,
+           "최소 판매량 아래로는 못 내려간다");
+
+        double up1 = planner.nudge(p, 2, +1);       // 샐러드 1개 늘리기
+        ck(near(up1, p.items[2].minAmount + 1.0), "낱개 메뉴는 1개씩 움직인다");
+        planner.nudge(p, 2, -1);
+        ck(near(p.items[2].amount, p.items[2].minAmount), "다시 1개 줄이면 제자리");
+
+        double back = p.items[1].amount;
+        planner.nudge(p, 1, +2);
+        ck(near(p.items[1].amount, back + 20.0), "무게 메뉴는 계량 단위만큼 움직인다");
+    }
+
+    std::printf("[손으로 맞춰도 추천과 같은 잣대로 본다]\n");
+    {
+        // 추천이 내놓은 그 양을 손으로 그대로 다시 넣으면 판정도 같아야 한다
+        Plan a = planner.solve(picks, budget);
+        Plan b = a;
+        for (std::size_t i = 0; i < b.items.size(); ++i)
+            planner.setAmount(b, i, a.items[i].amount);
+        ck(near(a.score, b.score), "같은 양이면 같은 점수");
+        ck(a.issues.size() == b.issues.size(), "같은 양이면 같은 경고");
+        ck(a.isWithinTolerance() == b.isWithinTolerance(), "초록불/빨간불이 갈리지 않는다");
+    }
+
+    std::printf("[그날 남은 영양분으로 바로 풀기]\n");
     Day today(Date(2026,8,30), NutritionGoal(Macros(250, 150, 60)));
     today.addMeal(Meal("breakfast", MealTime::Breakfast, Macros(60, 20, 10)));
     double before = today.remainingCalories();
-    std::vector<Suggestion> dn = suggestDinner(planner, today, 3);
-    ck(!dn.empty(), "suggestDinner reads Day::remaining()");
-    ck(near(dn[0].targetCalories, before), "target = remaining calories of the day");
+
+    Plan dinner = planner.solveFor(picks, today);
+    ck(near(dinner.targetCalories, before), "목표 = 그날 남은 열량");
 
     std::size_t mealsBefore = today.mealCount();
-    logSuggestion(today, dn[0]);
-    ck(today.mealCount() == mealsBefore + dn[0].items.size(), "one Meal per menu logged");
-    ck(near(today.remainingCalories(), before - dn[0].calories),
-       "remaining drops by exactly the chosen calories");
-    ck(today.meals()[mealsBefore].time() == MealTime::Dinner, "logged as dinner");
-    ck(today.meals()[mealsBefore].hasExactTime(), "logged with an exact clock");
+    logPlan(today, dinner);
+    ck(today.mealCount() == mealsBefore + dinner.itemCount(), "메뉴 하나가 Meal 하나");
+    ck(near(today.remainingCalories(), before - dinner.calories),
+       "남은 양이 담은 열량만큼 정확히 줄어든다");
+    ck(today.meals()[mealsBefore].time() == MealTime::Dinner, "저녁으로 기록");
+    ck(today.meals()[mealsBefore].hasExactTime(), "시각까지 남는다");
+    ck(near(today.meals()[mealsBefore].servings(), dinner.items[0].amount),
+       "기록에 담은 양이 그대로 남는다");
+
+    std::printf("[주간 메뉴판에서 이름으로 고르기]\n");
+    {
+        std::vector<std::string> names;
+        names.push_back("rice");
+        names.push_back("jeyuk");
+        names.push_back("miyeok-guk");
+        names.push_back("이번주에는 없는 메뉴");
+        std::vector<std::string> missing;
+        std::vector<Pick> fromWeek = picksFrom(week, names, &missing);
+        ck(fromWeek.size() == 3, "메뉴판에 있는 것만 고른다");
+        ck(missing.size() == 1 && missing[0] == "이번주에는 없는 메뉴",
+           "안 파는 메뉴는 지어내지 않고 빠진 것으로 알린다");
+        ck(planner.solve(fromWeek, budget).itemCount() == 3, "그대로 풀 수 있다");
+    }
+
+
+    std::printf("[MVP 메뉴판 15가지]\n");
+    WeeklyMenu mvp = mvpWeeklyMenu(Date(2026,9,2));
+    ck(mvp.size() == 15, "15가지가 모두 채워진다");
+    ck(mvp.isFull(), "메뉴판이 찼다");
+    ck(mvp.weekStart() == Date(2026,8,30), "그 날이 속한 주로 맞춰진다");
+    ck(mvpMenuNames().size() == 15, "이름 목록도 15개");
+
+    {
+        // 표에 적은 대로 들어갔는가 (100g / 1개 기준)
+        MenuPtr bap = mvp.find("잡곡밥");
+        ck(bap && near(macrosOf(*bap, 100.0).carbG, 33.0), "잡곡밥 100g 탄수화물 33g");
+        ck(bap && near(macrosOf(*bap, 100.0).proteinG, 3.5), "잡곡밥 100g 단백질 3.5g");
+        ck(bap && near(kcalPerUnitOf(*bap) * 100.0, 151.4), "잡곡밥 100g = 151.4kcal");
+
+        MenuPtr godeung = mvp.find("고등어구이");
+        ck(godeung && godeung->divisibility() == Divisibility::Discrete,
+           "고등어구이는 토막으로 판다 - 43g 만 팔 수는 없다");
+        ck(godeung && godeung->unit() == "토막", "단위는 토막");
+        ck(godeung && near(macrosOf(*godeung, 1.0).proteinG, 14.0), "1토막 단백질 14g");
+        ck(godeung && near(macrosOf(*godeung, 1.0).carbG, 0.0),
+           "생선에 탄수화물이 0 인 것은 모르는 것이 아니라 정말 0 이다");
+        ck(godeung && godeung->findNutrient("탄수화물") != 0,
+           "그래서 0 이라도 영양소를 빼지 않고 넣어 둔다");
+
+        MenuPtr jeyuk2 = mvp.find("제육볶음");
+        ck(jeyuk2 && near(kcalPerUnitOf(*jeyuk2) * 100.0, 205.0), "제육볶음 100g = 205kcal");
+    }
+
+    {
+        // 열다섯 가지 전부 팔 수 있는 상태인가
+        bool sane = true;
+        for (std::size_t i = 0; i < mvp.menus().size(); ++i) {
+            const MenuPtr& m = mvp.at(i);
+            if (m->unitPrice() <= 0) sane = false;
+            if (!m->isValidAmount(m->normalize(0.0))) sane = false;
+            if (!m->findNutrient("탄수화물") || !m->findNutrient("단백질")
+                || !m->findNutrient("지방")) sane = false;
+            double per100 = kcalPerUnitOf(*m)
+                          * (m->divisibility() == Divisibility::Discrete ? 1.0 : 100.0);
+            if (per100 < 50.0 || per100 > 300.0) sane = false;   // 상식 밖의 값 거르기
+        }
+        ck(sane, "열다섯 가지 모두 가격/영양소/최소 판매량이 멀쩡하다");
+    }
+
+    ck(mvpMenu("제육볶음") && mvpMenu("제육볶음")->name() == "제육볶음", "한 가지만 꺼내기");
+    ck(!mvpMenu("탕수육"), "표에 없는 이름은 지어내지 않는다");
+
+    std::printf("[MVP 메뉴로 실제 한 끼 풀기]\n");
+    {
+        MealPlanner mp;
+        Macros dinnerGoal(80, 50, 20);          // 700kcal / 단백질 50g
+        ck(near(dinnerGoal.calories(), 700.0), "저녁 목표는 700kcal");
+
+        std::vector<std::string> want;
+        want.push_back("잡곡밥");
+        want.push_back("간장 닭다리살 구이");
+        want.push_back("계란말이");
+        std::vector<std::string> lost;
+        std::vector<Pick> chosen = picksFrom(mvp, want, &lost);
+        ck(chosen.size() == 3 && lost.empty(), "메뉴판에서 세 가지를 골랐다");
+
+        Plan m = mp.solve(chosen, dinnerGoal);
+        ck(m.isWithinTolerance(), "밥/닭다리살/계란말이 조합은 700kcal 목표에 들어간다");
+        ck(m.macros.proteinG >= 45.0, "단백질 하한(90%) 이상");
+        ck(m.macros.fatG >= 700.0 * 0.20 / 9.0, "지방 하한(끼니 열량의 20%) 이상");
+
+        bool sellable = true;
+        for (std::size_t i = 0; i < m.items.size(); ++i)
+            if (!m.items[i].menu->isValidAmount(m.items[i].amount)) sellable = false;
+        ck(sellable, "밥은 10g 단위로, 계란말이는 줄 단위로 나온다");
+
+        // 계란말이는 낱개라 반 줄이 나올 수 없다
+        MenuPtr egg = mvp.find("계란말이");
+        std::size_t eggAt = 2;
+        ck(m.items[eggAt].menu == egg && m.items[eggAt].countsByUnit(),
+           "계란말이는 개수로 조절하는 항목");
+        ck(near(m.items[eggAt].amount, std::floor(m.items[eggAt].amount)),
+           "낱개 메뉴에 소수점이 나오지 않는다");
+        ck(near(m.items[eggAt].nudgeStep, 1.0), "한 번에 1줄씩 움직인다");
+        ck(m.items[0].step > 0.0 && near(m.items[0].step, 10.0), "밥은 10g 씩");
+    }
+
+    std::printf("[어떻게 해도 안 맞는 조합은 경고하고 최선을 준다]\n");
+    {
+        MealPlanner mp;
+        // 삼겹살 김치볶음은 100g 에 258kcal 인데 단백질은 11g 뿐이다.
+        // 515kcal 안에서 단백질 35g 을 뽑는 것은 이 조합으로는 불가능하다.
+        std::vector<std::string> want;
+        want.push_back("잡곡밥");
+        want.push_back("삼겹살 김치볶음");
+        want.push_back("브로콜리 참깨무침");
+        std::vector<Pick> chosen = picksFrom(mvp, want, 0);
+
+        Plan m = mp.solve(chosen, Macros(60, 35, 15));
+        ck(m.itemCount() == 3, "못 맞춰도 답은 돌려준다");
+        ck(m.isBestEffort() && !m.warning().empty(), "경고를 띄운다");
+        ck(m.has(Issue::CaloriesOver), "열량 초과가 이유로 잡힌다");
+
+        // 유저가 직접 줄일 수 있어야 한다
+        double before = m.calories;
+        mp.setAmount(m, 1, 100.0);              // 삼겹살을 100g 으로
+        ck(near(m.items[1].amount, 100.0), "유저가 넣은 양이 그대로 들어간다");
+        ck(m.calories < before, "합계가 그 자리에서 줄어든다");
+    }
+
+    std::printf("[MVP 메뉴판도 파일로 오간다]\n");
+    {
+        MenuBook mvpBook;
+        mvpBook.set(mvp);
+        Calendar empty(NutritionGoal(Macros(250,150,60)));
+
+        std::ostringstream out;
+        storage::write(empty, mvpBook, out);
+
+        Calendar back(NutritionGoal(Macros(1,1,1)));
+        MenuBook backBook;
+        std::istringstream in(out.str());
+        storage::read(back, backBook, in);
+
+        const WeeklyMenu* w = backBook.forDate(Date(2026,9,2));
+        ck(w && w->size() == 15, "15가지가 그대로 돌아온다");
+        MenuPtr g = w ? w->find("고등어구이") : MenuPtr();
+        ck(g && g->divisibility() == Divisibility::Discrete && g->unit() == "토막",
+           "토막으로 파는 것까지 그대로");
+        ck(g && near(macrosOf(*g, 2.0).fatG, 21.0), "2토막 지방 21g");
+    }
 
     std::printf("[FoodInfo]\n");
     FoodInfo kimchiJjigae("kimchi-jjigae", Macros(4.5, 5.2, 3.8), MacroSource::Official);
@@ -426,8 +808,7 @@ int main() {
     std::printf("[our menu is tagged OurMenu]\n");
     {
         Day d2(Date(2026,8,30), NutritionGoal(Macros(250, 150, 60)));
-        std::vector<Suggestion> s2 = suggestDinner(planner, d2, 1);
-        logSuggestion(d2, s2[0]);
+        logPlan(d2, planner.solveFor(picks, d2));
         ck(d2.meals()[0].source() == MacroSource::OurMenu, "our own menu marked OurMenu");
         ck(!d2.meals()[0].isEstimated(), "our menu is never an estimate");
 
@@ -465,7 +846,7 @@ int main() {
         ck(!pend[1].worthAsking, "a 2%-of-goal estimate is NOT worth interrupting for");
         ck(pend[0].shareOfGoal > 0.10 && pend[1].shareOfGoal < 0.10, "share thresholds");
 
-        ck(shouldAskBeforeSuggesting(gd), "order screen should ask first");
+        ck(shouldAskBeforePlanning(gd), "order screen should ask first");
 
         // 4) 사용자가 양을 고쳐 준다 - 700g 이 아니라 1000g 이었다
         double beforeKcal = gd.consumedCalories();
@@ -478,7 +859,7 @@ int main() {
         ck(gd.mealCount() == 3, "correcting does not add or drop meals");
         ck(gd.meals()[0].foodName() == "typed-breakfast", "other meals keep their order");
 
-        ck(!shouldAskBeforeSuggesting(gd), "nothing big left to ask about");
+        ck(!shouldAskBeforePlanning(gd), "nothing big left to ask about");
         ck(pendingConfirmations(gd).size() == 1, "the tiny snack is still pending");
         ck(!pendingConfirmations(gd)[0].worthAsking, "but still not worth asking");
 

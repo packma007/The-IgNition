@@ -22,7 +22,6 @@ CXX=g++
 CXXFLAGS="-std=c++14 -Wall -Wextra -I."
 OUT=bin
 SRCS="format.c++ domains.c++ user.c++ view.c++ input.c++"
-# intitial.c++는 아직 빈 파일이라 제외한다.
 
 if [ "$1" = "clean" ]; then
     rm -rf "$OUT"

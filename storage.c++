@@ -10,7 +10,8 @@
 namespace domains {
 namespace storage {
 
-    const int kFormatVersion = 3;   // v2: MEAL 에 출처, v3: 확인 여부 칸이 붙었다
+    // v2: MEAL 에 출처, v3: 확인 여부, v4: 주간 메뉴판(WEEKMENU/WMENU/WNUTRIENT)
+    const int kFormatVersion = 4;
 
     namespace {
 
@@ -140,11 +141,77 @@ namespace storage {
             }
         }
 
+        long long toLongLong(const std::string& s, std::size_t lineNo) {
+            std::istringstream i(s);
+            long long v;
+            if (!(i >> v)) fail(lineNo, "정수가 아닙니다: " + s);
+            return v;
+        }
+
+        // ---- 주간 메뉴판 ----
+
+        int fromDivisibility(Divisibility d) {
+            return d == Divisibility::Discrete ? 0 : 1;
+        }
+
+        int fromNutrient(const std::string& name) {
+            static const std::string carb    = Carbohydrate(0.0).name();
+            static const std::string protein = Protein(0.0).name();
+            static const std::string fat     = Fat(0.0).name();
+            if (name == carb)    return 0;
+            if (name == protein) return 1;
+            if (name == fat)     return 2;
+            return -1;
+        }
+
+        NutrientPtr makeNutrient(int code, double perUnit, std::size_t lineNo) {
+            switch (code) {
+                case 0: return NutrientPtr(new Carbohydrate(perUnit));
+                case 1: return NutrientPtr(new Protein(perUnit));
+                case 2: return NutrientPtr(new Fat(perUnit));
+            }
+            fail(lineNo, "영양소 값이 0..2 가 아닙니다");
+            return NutrientPtr();   // fail 이 예외를 던지므로 여기까지 오지 않는다
+        }
+
+        // 메뉴 하나와 그 영양소를 적는다.
+        // 판매 방식마다 지켜야 할 숫자가 다르므로 종류를 먼저 적고 세 칸을 붙인다.
+        void writeMenu(const Menu& m, std::ostream& out) {
+            double a = 0.0, b = 0.0, c = 0.0;
+            if (const DiscreteMenu* d = dynamic_cast<const DiscreteMenu*>(&m)) {
+                a = d->minCount();
+                b = d->step();
+            } else if (const ContinuousMenu* k = dynamic_cast<const ContinuousMenu*>(&m)) {
+                a = k->minAmount();
+                b = k->maxAmount();
+                c = k->step();
+            } else {
+                // 새로 만든 Menu 파생 클래스는 어떤 숫자를 지켜야 하는지 여기서 알 수 없다.
+                // 조용히 기본값으로 적으면 다시 읽었을 때 판매 조건이 달라져 있다.
+                throw std::runtime_error("저장할 수 없는 메뉴 종류입니다: " + m.name());
+            }
+
+            out << "WMENU" << kSep << esc(m.name()) << kSep << esc(m.unit())
+                << kSep << m.unitPrice()
+                << kSep << fromDivisibility(m.divisibility())
+                << kSep << num(a) << kSep << num(b) << kSep << num(c) << "\n";
+
+            const std::vector<NutrientPtr>& ns = m.nutrients();
+            for (std::size_t i = 0; i < ns.size(); ++i) {
+                int code = fromNutrient(ns[i]->name());
+                if (code < 0)
+                    throw std::runtime_error("저장할 수 없는 영양소입니다: "
+                                             + m.name() + " 의 " + ns[i]->name());
+                out << "WNUTRIENT" << kSep << code
+                    << kSep << num(ns[i]->amountPerUnit()) << "\n";
+            }
+        }
+
     }
 
     // ---------- 쓰기 ----------
 
-    void write(const Calendar& calendar, std::ostream& out) {
+    void write(const Calendar& calendar, const MenuBook& menus, std::ostream& out) {
         out << "IGNITION" << kSep << kFormatVersion << "\n";
 
         const DayBoundary& b = calendar.boundary();
@@ -153,6 +220,19 @@ namespace storage {
         const Macros& dg = calendar.defaultGoal().target();
         out << "DEFAULTGOAL" << kSep << num(dg.carbG) << kSep
             << num(dg.proteinG) << kSep << num(dg.fatG) << "\n";
+
+        // 메뉴판을 먼저 적는다. 기록보다 메뉴판이 앞서야 사람이 파일을 열어 봤을 때
+        // "이번 주에 뭘 팔았고, 그중 무엇을 먹었는지" 순서로 읽힌다.
+        const std::map<Date, WeeklyMenu>& weeks = menus.weeks();
+        for (std::map<Date, WeeklyMenu>::const_iterator it = weeks.begin();
+             it != weeks.end(); ++it) {
+            const Date& w = it->first;
+            out << "WEEKMENU" << kSep << w.year << kSep << w.month << kSep << w.day << "\n";
+
+            const std::vector<MenuPtr>& list = it->second.menus();
+            for (std::size_t i = 0; i < list.size(); ++i)
+                writeMenu(*list[i], out);
+        }
 
         const std::map<Date, Day>& days = calendar.days();
         for (std::map<Date, Day>::const_iterator it = days.begin();
@@ -194,15 +274,19 @@ namespace storage {
 
     // ---------- 읽기 ----------
 
-    void read(Calendar& calendar, std::istream& in) {
+    void read(Calendar& calendar, MenuBook& menus, std::istream& in) {
         calendar.clear();
+        menus.clear();
 
         std::string line;
         std::size_t lineNo = 0;
         bool sawHeader = false;
         bool haveDay = false;
+        bool haveWeek = false;
         int fileVersion = kFormatVersion;
         Date current;
+        Date weekStart;
+        MenuPtr currentMenu;
 
         while (std::getline(in, line)) {
             ++lineNo;
@@ -241,6 +325,55 @@ namespace storage {
                     toDouble(f[1], lineNo),
                     toDouble(f[2], lineNo),
                     toDouble(f[3], lineNo))));
+
+            } else if (tag == "WEEKMENU") {
+                needFields(f, 4, lineNo, "WEEKMENU");
+                weekStart = Date(toInt(f[1], lineNo),
+                                 toInt(f[2], lineNo),
+                                 toInt(f[3], lineNo));
+                if (weekStart != WeeklyMenu::weekStartOf(weekStart))
+                    fail(lineNo, "WEEKMENU 날짜는 그 주의 일요일이어야 합니다");
+                haveWeek = true;
+                currentMenu = MenuPtr();
+                menus.weekOf(weekStart);   // 메뉴가 하나도 없는 주도 그대로 남긴다
+
+            } else if (tag == "WMENU") {
+                if (!haveWeek) fail(lineNo, "WEEKMENU 없이 WMENU 가 나왔습니다");
+                needFields(f, 8, lineNo, "WMENU");
+                std::string mname = unesc(f[1]);
+                std::string munit = unesc(f[2]);
+                long long price   = toLongLong(f[3], lineNo);
+                int kind          = toInt(f[4], lineNo);
+                double a = toDouble(f[5], lineNo);
+                double b = toDouble(f[6], lineNo);
+                double c = toDouble(f[7], lineNo);
+                if (kind != 0 && kind != 1)
+                    fail(lineNo, "메뉴 종류가 0(낱개)이나 1(무게/부피)가 아닙니다");
+                try {
+                    currentMenu = kind == 0
+                        ? MenuPtr(new DiscreteMenu(mname, munit, price,
+                                                   static_cast<int>(a),
+                                                   static_cast<int>(b)))
+                        : MenuPtr(new ContinuousMenu(mname, munit, price, a, b, c));
+                    menus.weekOf(weekStart).add(currentMenu);
+                } catch (const std::runtime_error&) {
+                    throw;                       // fail() 이 던진 것은 그대로 내보낸다
+                } catch (const std::exception& e) {
+                    fail(lineNo, e.what());      // 나머지는 몇 번째 줄인지를 붙여 준다
+                }
+
+            } else if (tag == "WNUTRIENT") {
+                if (!currentMenu) fail(lineNo, "WMENU 없이 WNUTRIENT 가 나왔습니다");
+                needFields(f, 3, lineNo, "WNUTRIENT");
+                int code   = toInt(f[1], lineNo);
+                double per = toDouble(f[2], lineNo);
+                try {
+                    currentMenu->addNutrient(makeNutrient(code, per, lineNo));
+                } catch (const std::runtime_error&) {
+                    throw;
+                } catch (const std::exception& e) {
+                    fail(lineNo, e.what());
+                }
 
             } else if (tag == "DAY") {
                 needFields(f, 7, lineNo, "DAY");
@@ -309,15 +442,15 @@ namespace storage {
 
     // ---------- 파일 ----------
 
-    bool save(const Calendar& calendar, const std::string& path,
-              std::string* error) {
+    bool save(const Calendar& calendar, const MenuBook& menus,
+              const std::string& path, std::string* error) {
         std::ofstream out(path.c_str());
         if (!out) {
             if (error) *error = "파일을 쓸 수 없습니다: " + path;
             return false;
         }
         try {
-            write(calendar, out);
+            write(calendar, menus, out);
         } catch (const std::exception& e) {
             if (error) *error = e.what();
             return false;
@@ -330,20 +463,43 @@ namespace storage {
         return true;
     }
 
-    bool load(Calendar& calendar, const std::string& path,
-              std::string* error) {
+    bool load(Calendar& calendar, MenuBook& menus,
+              const std::string& path, std::string* error) {
         std::ifstream in(path.c_str());
         if (!in) {
             if (error) *error = "파일을 열 수 없습니다: " + path;
             return false;
         }
         try {
-            read(calendar, in);
+            read(calendar, menus, in);
         } catch (const std::exception& e) {
             if (error) *error = path + " - " + e.what();
             return false;
         }
         return true;
+    }
+
+    // ---------- 메뉴판이 필요 없을 때 ----------
+
+    // 쓸 때는 빈 메뉴판을 넣고, 읽을 때는 WEEKMENU 를 읽고 버린다.
+    // 버릴지언정 건너뛰지는 않는다 - 형식이 틀린 줄은 여기서도 예외가 되어야 한다.
+
+    void write(const Calendar& calendar, std::ostream& out) {
+        write(calendar, MenuBook(), out);
+    }
+
+    void read(Calendar& calendar, std::istream& in) {
+        MenuBook discarded;
+        read(calendar, discarded, in);
+    }
+
+    bool save(const Calendar& calendar, const std::string& path, std::string* error) {
+        return save(calendar, MenuBook(), path, error);
+    }
+
+    bool load(Calendar& calendar, const std::string& path, std::string* error) {
+        MenuBook discarded;
+        return load(calendar, discarded, path, error);
     }
 
 }
