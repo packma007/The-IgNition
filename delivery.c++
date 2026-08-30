@@ -98,15 +98,31 @@ namespace domains {
 
     namespace {
 
-        // 거리와 소요시간 표. 0번은 가게, 1..n 은 집.
+        // 표 위의 자리. 0 번이 가게, 1..n 이 집이다.
+        //
+        // 집 번호(Stop 번호)와 한 칸씩 어긋나 있는데, 둘 다 std::size_t 로 두면
+        // m.d(cur, s) 처럼 섞어 써도 컴파일이 되고 조용히 틀린 값이 나온다.
+        // 그래서 표 번호만 타입으로 갈라 둔다. 어긋나는 +1 은 Node::of() 안에만 있다.
+        struct Node {
+            std::size_t v = 0;
+
+            static Node depot() { return Node(); }
+            static Node of(std::size_t stopIndex) {
+                Node n;
+                n.v = stopIndex + 1;
+                return n;
+            }
+        };
+
+        // 거리와 소요시간 표.
         // 한 번만 재 둔다 - 도로 API 를 꽂으면 호출이 비싸지므로 이 캐시가 중요해진다.
         struct Matrix {
             std::size_t n = 0;
             std::vector<double> dist;      // (n+1) x (n+1) 미터
             std::vector<double> mins;      // (n+1) x (n+1) 분
 
-            double d(std::size_t a, std::size_t b) const { return dist[a * (n + 1) + b]; }
-            double t(std::size_t a, std::size_t b) const { return mins[a * (n + 1) + b]; }
+            double d(Node a, Node b) const { return dist[a.v * (n + 1) + b.v]; }
+            double t(Node a, Node b) const { return mins[a.v * (n + 1) + b.v]; }
         };
 
         Matrix buildMatrix(const Location& depot,
@@ -124,6 +140,8 @@ namespace domains {
             pts.push_back(&depot);
             for (std::size_t i = 0; i < stops.size(); ++i) pts.push_back(&stops[i].location);
 
+            // 표를 채우는 이곳만 자리 번호를 날것으로 다룬다 (0 이 가게, 1.. 이 집).
+            // 다 채운 뒤로는 전부 Node 로만 읽는다.
             for (std::size_t a = 0; a < side; ++a) {
                 for (std::size_t b = 0; b < side; ++b) {
                     if (a == b) continue;
@@ -156,13 +174,13 @@ namespace domains {
             if (order.empty()) return e;
             if (wantVisits) e.visits.reserve(order.size());
 
-            std::size_t cur = 0;               // 가게
+            Node cur = Node::depot();
             double clock = departMinutes;
 
             for (std::size_t i = 0; i < order.size(); ++i) {
                 std::size_t s = order[i];
-                e.meters += m.d(cur, s + 1);
-                clock    += m.t(cur, s + 1);
+                e.meters += m.d(cur, Node::of(s));
+                clock    += m.t(cur, Node::of(s));
 
                 const Stop& st = stops[s];
                 double wait = 0.0, late = 0.0;
@@ -192,12 +210,12 @@ namespace domains {
                     v.leaveAt = fromMinutes(clock);
                     e.visits.push_back(v);
                 }
-                cur = s + 1;
+                cur = Node::of(s);
             }
 
             if (returnToDepot) {
-                e.meters += m.d(cur, 0);
-                clock    += m.t(cur, 0);
+                e.meters += m.d(cur, Node::depot());
+                clock    += m.t(cur, Node::depot());
             }
             e.totalMinutes = clock - departMinutes;
             return e;
@@ -220,7 +238,7 @@ namespace domains {
             if (m.n == 0) return order;
 
             std::vector<bool> used(m.n, false);
-            std::size_t cur = 0;
+            Node cur = Node::depot();
             double clock = departMinutes;
 
             for (std::size_t step = 0; step < m.n; ++step) {
@@ -229,7 +247,7 @@ namespace domains {
 
                 for (std::size_t i = 0; i < m.n; ++i) {
                     if (used[i]) continue;
-                    double arrive = clock + m.t(cur, i + 1);
+                    double arrive = clock + m.t(cur, Node::of(i));
                     double wait = 0.0, late = 0.0;
 
                     if (stops[i].window.isSet()) {
@@ -240,7 +258,7 @@ namespace domains {
                     }
 
                     // 기다리는 시간도 손해이므로 거리로 환산해 더한다
-                    double c = m.d(cur, i + 1)
+                    double c = m.d(cur, Node::of(i))
                              + latePenalty * late
                              + wait * speedMetersPerMinute * 0.5;
 
@@ -250,13 +268,13 @@ namespace domains {
                 used[best] = true;
                 order.push_back(best);
 
-                double arrive = clock + m.t(cur, best + 1);
+                double arrive = clock + m.t(cur, Node::of(best));
                 if (stops[best].window.isSet()) {
                     double early = static_cast<double>(stops[best].window.earliest.minutesOfDay());
                     if (arrive < early) arrive = early;
                 }
                 clock = arrive + stops[best].serviceMinutes;
-                cur = best + 1;
+                cur = Node::of(best);
             }
             return order;
         }
