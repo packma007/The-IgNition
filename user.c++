@@ -24,7 +24,8 @@ namespace domains {
                double weightKg,
                double heightCm,
                double bodyFatPercent,
-               double skeletalMuscleKg)
+               double skeletalMuscleKg,
+               Location location)
         : name_(std::move(name)),
           age_(age),
           gender_(gender),
@@ -32,7 +33,8 @@ namespace domains {
           weightKg_(weightKg),
           heightCm_(heightCm),
           bodyFatPercent_(bodyFatPercent),
-          skeletalMuscleKg_(skeletalMuscleKg) {
+          skeletalMuscleKg_(skeletalMuscleKg),
+          location_(location) {
         if (name_.empty()) throw std::invalid_argument("name must not be empty");
         if (email_.find('@') == std::string::npos)
             throw std::invalid_argument("email must contain '@'");

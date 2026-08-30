@@ -2,6 +2,7 @@
 #define USER
 #include <string>
 #include <memory>
+#include "location.h"
 
 namespace domains {
 
@@ -28,7 +29,8 @@ namespace domains {
              double weightKg,
              double heightCm,
              double bodyFatPercent = 0.0,
-             double skeletalMuscleKg = 0.0);
+             double skeletalMuscleKg = 0.0,
+             Location location = Location());
 
         const std::string& name() const { return name_; }
         int age() const { return age_; }
@@ -38,6 +40,11 @@ namespace domains {
         double heightCm() const { return heightCm_; }
         double bodyFatPercent() const { return bodyFatPercent_; }
         double skeletalMuscleKg() const { return skeletalMuscleKg_; }
+
+        // 배달할 곳. 넣지 않으면 isSet() 이 false 다.
+        const Location& location() const { return location_; }
+        void setLocation(Location location) { location_ = location; }
+        bool hasLocation() const { return location_.isSet(); }
 
         // 측정값은 바뀌므로 수정할 수 있게 둔다
         void setAge(int age);
@@ -67,6 +74,7 @@ namespace domains {
         double heightCm_;
         double bodyFatPercent_;    // 0이면 모름
         double skeletalMuscleKg_;  // 0이면 모름
+        Location location_;        // 배달지. 안 넣었으면 좌표가 (0,0)
     };
 
     using UserPtr = std::shared_ptr<User>;
